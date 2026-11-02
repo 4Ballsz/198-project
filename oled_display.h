@@ -6,6 +6,7 @@
 #include <Adafruit_SSD1306.h>
 #include "config.h"
 
+// Display instance
 inline Adafruit_SSD1306 g_oled(128, 64, &Wire, -1);
 inline bool g_oledConnected = false;
 
@@ -14,6 +15,7 @@ namespace {
   uint32_t s_lastOledProbe = 0;
 }
 
+// Calibration screen
 inline void showOledCalibrating() {
   if (!g_oledConnected) return;
   g_oled.clearDisplay();
@@ -35,6 +37,7 @@ inline void showOledCalibrating() {
   g_oled.display();
 }
 
+// Touch IP trigger
 inline uint32_t g_showIpScreenUntilMs = 0;
 inline uint32_t g_lastTouchVal = 0;
 inline uint32_t g_touchBaseline = 0;
@@ -44,6 +47,7 @@ inline void triggerIpScreen(uint32_t durationMs = 4000) {
   g_showIpScreenUntilMs = millis() + durationMs;
 }
 
+// Touch sensor check
 inline bool checkTouchIpSensor() {
   uint32_t val = (uint32_t)touchRead(PIN_TOUCH_IP);
   g_lastTouchVal = val;
@@ -58,19 +62,16 @@ inline bool checkTouchIpSensor() {
 
   if (val == 0) return false;
 
-  // On ESP32-S3 (touch sensor v2), capacitance increases when touched
   uint32_t delta = (val > g_touchBaseline) ? (val - g_touchBaseline) : 0;
-  uint32_t threshold = g_touchBaseline / 6; // ~16% delta threshold
+  uint32_t threshold = g_touchBaseline / 6;
   if (threshold < 5000) threshold = 5000;
 
   bool isTouched = (delta > threshold);
 
   if (!isTouched) {
     if (val < g_touchBaseline) {
-      // Rapid downward adaptation if baseline was initialized while touched
       g_touchBaseline = (g_touchBaseline * 3 + val) / 4;
     } else {
-      // Smoothly adapt baseline to ambient environmental drift
       g_touchBaseline = (g_touchBaseline * 31 + val) / 32;
     }
   }
@@ -78,6 +79,7 @@ inline bool checkTouchIpSensor() {
   return isTouched;
 }
 
+// IP info screen
 inline void showOledIpInfo() {
   if (!g_oledConnected) return;
   g_oled.clearDisplay();
@@ -93,7 +95,6 @@ inline void showOledIpInfo() {
 
   String ipStr = WiFi.localIP().toString();
 
-  // If IP fits on a single line in big size 2 font (<= 10 chars, width <= 120px)
   if (ipStr.length() <= 10) {
     g_oled.setTextSize(2);
     int16_t x = (128 - (int16_t)(ipStr.length() * 12)) / 2;
@@ -101,15 +102,13 @@ inline void showOledIpInfo() {
     g_oled.setCursor(x, 24);
     g_oled.print(ipStr);
   } else {
-    // For standard IPv4 (e.g. 10.227.255.235 or 192.168.1.100), split cleanly at the second dot
-    // into two big size-2 centered lines without any "IP: " label
     int dotCount = 0;
     int splitIdx = -1;
     for (int i = 0; i < (int)ipStr.length(); i++) {
       if (ipStr[i] == '.') {
         dotCount++;
         if (dotCount == 2) {
-          splitIdx = i; // keep second dot on the first line
+          splitIdx = i;
           break;
         }
       }
@@ -136,20 +135,18 @@ inline void showOledIpInfo() {
   g_oled.display();
 }
 
+// Boot progress screen
 inline void showOledBootProgress(const char* oneWordStatus) {
   if (!g_oledConnected) return;
   g_oled.clearDisplay();
   g_oled.setTextColor(SSD1306_WHITE);
 
-  // Top header: "BOOTING..." centered (y = 8)
   g_oled.setTextSize(1);
   g_oled.setCursor(32, 8);
   g_oled.print(F("BOOTING..."));
 
-  // Sleek divider line
   g_oled.drawFastHLine(14, 22, 100, SSD1306_WHITE);
 
-  // One word showing what is currently booting up, centered
   size_t len = strlen(oneWordStatus);
   int textSize = (len <= 8) ? 2 : 1;
   int charWidth = (textSize == 2) ? 12 : 6;
@@ -165,9 +162,9 @@ inline void showOledBootProgress(const char* oneWordStatus) {
   g_oled.display();
 }
 
+// OLED initialization
 inline bool initOled() {
   if (g_oledConnected) return true;
-  // Try 0x3C (standard default) then 0x3D (alternate address)
   if (g_oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)) {
     g_oledConnected = true;
     Serial.println(F("[OLED] SSD1306 128x64 display initialized at 0x3C!"));
@@ -180,21 +177,20 @@ inline bool initOled() {
     return false;
   }
 
-  // Rotate screen 180 degrees per user request
   g_oled.setRotation(2);
   return true;
 }
 
-// Forward declarations of vitals accessors from pulse_ox.h
+// Vitals forward declarations
 int getDisplayBpm();
 int getDisplaySpo2();
 float getCoreTemp();
 const char* getPulseOxStatusStr();
 
+// Screen update
 inline void updateOledScreen() {
   uint32_t now = millis();
 
-  // If display was not detected at boot, periodically re-probe every 4 seconds
   if (!g_oledConnected) {
     if (now - s_lastOledProbe >= 4000) {
       s_lastOledProbe = now;
@@ -203,17 +199,14 @@ inline void updateOledScreen() {
     return;
   }
 
-  // Refresh display at ~10 Hz (every 100 ms)
   if (now - s_lastOledUpdate < 100) return;
   s_lastOledUpdate = now;
 
-  // While calibrating on boot, keep calibration and IP screen active
   if (!isCalibrated) {
     showOledCalibrating();
     return;
   }
 
-  // If Touch 11 was touched, display dedicated IP information screen
   if (millis() < g_showIpScreenUntilMs) {
     showOledIpInfo();
     return;
@@ -222,9 +215,7 @@ inline void updateOledScreen() {
   g_oled.clearDisplay();
   g_oled.setTextColor(SSD1306_WHITE);
 
-  // -------------------------------------------------------------------------
-  // ROW 1: Rep Counter & FSM State (y = 0..8)
-  // -------------------------------------------------------------------------
+  // Rep counter & state
   g_oled.setTextSize(1);
   g_oled.setCursor(0, 0);
   g_oled.printf("REPS: %u", (unsigned int)g_repCount);
@@ -235,16 +226,13 @@ inline void updateOledScreen() {
   else if (g_fsmState == STATE_ECCENTRIC) stateStr = "DOWN";
   else if (g_fsmState == STATE_COMPLETED) stateStr = "DONE";
 
-  // Right-align state badge
   int16_t stateX = 128 - (strlen(stateStr) * 6);
   g_oled.setCursor(stateX, 0);
   g_oled.print(stateStr);
 
   g_oled.drawFastHLine(0, 10, 128, SSD1306_WHITE);
 
-  // -------------------------------------------------------------------------
-  // ROW 2: Live Kinematics - Angle & Form Quality Q (y = 13..21)
-  // -------------------------------------------------------------------------
+  // Live kinematics
   g_oled.setCursor(0, 13);
   g_oled.printf("Ang: %4.1f\xF7", g_kinematics.angleDeg);
 
@@ -253,10 +241,7 @@ inline void updateOledScreen() {
 
   g_oled.drawFastHLine(0, 23, 128, SSD1306_WHITE);
 
-  // -------------------------------------------------------------------------
-  // ROW 3: Vitals - Heart Rate & SpO2 (y = 26..34)
-  // Only display O2 label when readings are ready to prevent text overlap
-  // -------------------------------------------------------------------------
+  // Vitals
   int curBpm = getDisplayBpm();
   int curSpo2 = getDisplaySpo2();
 
@@ -266,16 +251,13 @@ inline void updateOledScreen() {
     g_oled.setCursor(76, 26);
     g_oled.printf("O2: %2d%%", curSpo2);
   } else {
-    // Full width status message when measuring or waiting for finger
     const char* oxStat = getPulseOxStatusStr();
     g_oled.printf("HR: %s", oxStat);
   }
 
   g_oled.drawFastHLine(0, 36, 128, SSD1306_WHITE);
 
-  // -------------------------------------------------------------------------
-  // ROW 4: Diagnostics - Core Temp & Last Rep Peak (y = 39..47)
-  // -------------------------------------------------------------------------
+  // Diagnostics
   g_oled.setCursor(0, 39);
   g_oled.printf("Temp: %.1fC", getCoreTemp());
 
@@ -284,10 +266,7 @@ inline void updateOledScreen() {
     g_oled.printf("Pk: %2.0f\xF7", g_lastCompletedRep.peakAngleDeg);
   }
 
-  // -------------------------------------------------------------------------
-  // ROW 5: Real-Time Dynamic Curl Angle Gauge (y = 51..63)
-  // Progress bar scales 0 deg -> 0%, 90 deg -> 100%
-  // -------------------------------------------------------------------------
+  // Curl angle gauge
   g_oled.drawRect(0, 52, 128, 11, SSD1306_WHITE);
   int fillWidth = (int)((g_kinematics.angleDeg / 90.0f) * 122.0f);
   if (fillWidth > 122) fillWidth = 122;
@@ -296,7 +275,6 @@ inline void updateOledScreen() {
     g_oled.fillRect(3, 55, fillWidth, 5, SSD1306_WHITE);
   }
 
-  // Mark the 70 deg peak threshold on the gauge bar
   int peakMarkerX = 3 + (int)((70.0f / 90.0f) * 122.0f);
   g_oled.drawFastVLine(peakMarkerX, 52, 3, SSD1306_WHITE);
   g_oled.drawFastVLine(peakMarkerX, 60, 3, SSD1306_WHITE);

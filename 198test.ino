@@ -1,14 +1,7 @@
-/*
- *   - Board: Generic ESP32-S3 Dev Module
- *   - Xout: GPIO 7, Yout: GPIO 6, Zout: GPIO 5, NeoPixel: GPIO 48
- *
- *   - Wi-Fi Station: Connects to predefined AP
- *   - Dashboard: http://<obtained-ip>
- */
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 #include <esp32-hal-rgb-led.h>
 #include <math.h>
 
@@ -41,71 +34,75 @@ bool g_paused = false;
 bool g_plotterMode = false;
 
 WebServer server(80);
+WebSocketsServer webSocket(81);
+size_t s_lastWsRepHistoryCount = 0;
+uint32_t s_lastWsRepCount = 0;
 
 void calibrateRestPosition();
 
-// rgb thingy - the neopix color order stuff
+// neopix RGB
 void setNeoPixelColor(uint8_t red, uint8_t green, uint8_t blue) {
   rgbLedWriteOrdered(PIN_NEOPIXEL, LED_COLOR_ORDER_RGB, red, green, blue);
 }
 
-// sample & filter out
+// filter
 void sampleAccelerometer() {
   uint32_t sumX = 0, sumY = 0, sumZ = 0;
-  for (int i = 0; i < 8; i++) {
+  constexpr int OVERSAMPLES = 4;
+  for (int i = 0; i < OVERSAMPLES; i++) {
     sumX += analogReadMilliVolts(PIN_XOUT);
     sumY += analogReadMilliVolts(PIN_YOUT);
     sumZ += analogReadMilliVolts(PIN_ZOUT);
   }
-  g_sensor.mvX = (float)(sumX / 8);
-  g_sensor.mvY = (float)(sumY / 8);
-  g_sensor.mvZ = (float)(sumZ / 8);
+  g_sensor.mvX = (float)(sumX / OVERSAMPLES);
+  g_sensor.mvY = (float)(sumY / OVERSAMPLES);
+  g_sensor.mvZ = (float)(sumZ / OVERSAMPLES);
 
-  float raw_ax = (g_sensor.mvX - g_zeroG_X_mV) / g_sensitivity_mV_per_g;
-  float raw_ay = (g_sensor.mvY - g_zeroG_Y_mV) / g_sensitivity_mV_per_g;
-  float raw_az = (g_sensor.mvZ - g_zeroG_Z_mV) / g_sensitivity_mV_per_g;
+  g_sensor.ax_g = (g_sensor.mvX - g_zeroG_X_mV) / g_sensitivity_mV_per_g;
+  g_sensor.ay_g = (g_sensor.mvY - g_zeroG_Y_mV) / g_sensitivity_mV_per_g;
+  g_sensor.az_g = (g_sensor.mvZ - g_zeroG_Z_mV) / g_sensitivity_mV_per_g;
 
-  g_sensor.ax_g = raw_ax;
-  g_sensor.ay_g = raw_ay;
-  g_sensor.az_g = raw_az;
-
-  constexpr float EMA_ALPHA = 0.20f;
-  g_sensor.filtered_ax = (EMA_ALPHA * raw_ax) + ((1.0f - EMA_ALPHA) * g_sensor.filtered_ax);
-  g_sensor.filtered_ay = (EMA_ALPHA * raw_ay) + ((1.0f - EMA_ALPHA) * g_sensor.filtered_ay);
-  g_sensor.filtered_az = (EMA_ALPHA * raw_az) + ((1.0f - EMA_ALPHA) * g_sensor.filtered_az);
+  constexpr float ALPHA = 0.30f;
+  g_sensor.filtered_ax = (ALPHA * g_sensor.ax_g) + ((1.0f - ALPHA) * g_sensor.filtered_ax);
+  g_sensor.filtered_ay = (ALPHA * g_sensor.ay_g) + ((1.0f - ALPHA) * g_sensor.filtered_ay);
+  g_sensor.filtered_az = (ALPHA * g_sensor.az_g) + ((1.0f - ALPHA) * g_sensor.filtered_az);
 }
 
-//  kinematics
+// kinematics
 void computeKinematics(float dt_sec) {
-  g_kinematics.prevAngleDeg = g_kinematics.angleDeg;
-
   float dot = (g_sensor.filtered_ax * restX_g) +
               (g_sensor.filtered_ay * restY_g) +
               (g_sensor.filtered_az * restZ_g);
-  float magCurr = sqrtf((g_sensor.filtered_ax * g_sensor.filtered_ax) +
-                        (g_sensor.filtered_ay * g_sensor.filtered_ay) +
-                        (g_sensor.filtered_az * g_sensor.filtered_az));
+
+  float magCurrent = sqrtf((g_sensor.filtered_ax * g_sensor.filtered_ax) +
+                           (g_sensor.filtered_ay * g_sensor.filtered_ay) +
+                           (g_sensor.filtered_az * g_sensor.filtered_az));
+
   float magRest = sqrtf((restX_g * restX_g) + (restY_g * restY_g) + (restZ_g * restZ_g));
+  float denom = magCurrent * magRest;
 
-  if (magCurr > 0.1f && magRest > 0.1f) {
-    float cosAngle = dot / (magCurr * magRest);
-    if (cosAngle > 1.0f) cosAngle = 1.0f;
-    if (cosAngle < -1.0f) cosAngle = -1.0f;
-    float calculatedAngle = acosf(cosAngle) * (180.0f / 3.14159265f);
-
-    constexpr float ANGLE_SMOOTH = 0.35f;
-    g_kinematics.angleDeg = (ANGLE_SMOOTH * calculatedAngle) + ((1.0f - ANGLE_SMOOTH) * g_kinematics.angleDeg);
+  float angle_deg = 0.0f;
+  if (denom > 0.0001f) {
+    float cosTheta = dot / denom;
+    if (cosTheta > 1.0f) cosTheta = 1.0f;
+    if (cosTheta < -1.0f) cosTheta = -1.0f;
+    angle_deg = acosf(cosTheta) * (180.0f / (float)M_PI);
   }
 
-  if (dt_sec > 0.001f) {
-    float rawVel = (g_kinematics.angleDeg - g_kinematics.prevAngleDeg) / dt_sec;
-    g_kinematics.angularVelocity = (0.30f * rawVel) + (0.70f * g_kinematics.angularVelocity);
+  constexpr float ANGLE_LPF = 0.40f;
+  g_kinematics.prevAngleDeg = g_kinematics.angleDeg;
+  g_kinematics.angleDeg = (ANGLE_LPF * angle_deg) + ((1.0f - ANGLE_LPF) * g_kinematics.angleDeg);
+
+  if (dt_sec > 0.0001f) {
+    float instantVel = (g_kinematics.angleDeg - g_kinematics.prevAngleDeg) / dt_sec;
+    constexpr float VEL_LPF = 0.35f;
+    g_kinematics.angularVelocity = (VEL_LPF * instantVel) + ((1.0f - VEL_LPF) * g_kinematics.angularVelocity);
   }
 
   static float lastFiltAx = 0, lastFiltAy = 0, lastFiltAz = 0;
-  float dAx = (g_sensor.filtered_ax - lastFiltAx) / dt_sec;
-  float dAy = (g_sensor.filtered_ay - lastFiltAy) / dt_sec;
-  float dAz = (g_sensor.filtered_az - lastFiltAz) / dt_sec;
+  float dAx = (dt_sec > 0.0001f) ? (g_sensor.filtered_ax - lastFiltAx) / dt_sec : 0.0f;
+  float dAy = (dt_sec > 0.0001f) ? (g_sensor.filtered_ay - lastFiltAy) / dt_sec : 0.0f;
+  float dAz = (dt_sec > 0.0001f) ? (g_sensor.filtered_az - lastFiltAz) / dt_sec : 0.0f;
   lastFiltAx = g_sensor.filtered_ax;
   lastFiltAy = g_sensor.filtered_ay;
   lastFiltAz = g_sensor.filtered_az;
@@ -114,7 +111,7 @@ void computeKinematics(float dt_sec) {
   g_kinematics.jerk = (0.35f * rawJerk) + (0.65f * g_kinematics.jerk);
 }
 
-// quality
+// form quality
 void updateLiveQuality() {
   if (g_fsmState == STATE_IDLE) {
     g_kinematics.liveQuality = 100.0f;
@@ -159,7 +156,7 @@ void updateLiveQuality() {
   }
 }
 
-// rgb led feedback q factor
+// neopix feedback
 void updateNeoPixelFeedback() {
   uint32_t now = millis();
 
@@ -173,14 +170,14 @@ void updateNeoPixelFeedback() {
   }
 
   if (g_fsmState == STATE_IDLE) {
-    static uint8_t pulse = 3;
+    static uint8_t pulse = 4;
     static bool dir = true;
     if (dir) {
-      if (++pulse >= 14) dir = false;
+      if (++pulse >= 20) dir = false;
     } else {
-      if (--pulse <= 3) dir = true;
+      if (--pulse <= 4) dir = true;
     }
-    setNeoPixelColor(0, pulse / 2, pulse);
+    setNeoPixelColor(0, 0, pulse);
     return;
   }
 
@@ -189,7 +186,7 @@ void updateNeoPixelFeedback() {
   if (q > 100.0f) q = 100.0f;
 
   uint8_t r = 0, g = 0, b = 0;
-  constexpr uint8_t MAX_BRIGHTNESS = 40;
+  constexpr uint8_t MAX_BRIGHTNESS = 45;
 
   if (q >= 50.0f) {
     float ratio = (100.0f - q) / 50.0f;
@@ -208,7 +205,7 @@ void updateNeoPixelFeedback() {
 
 void printRepSummary();
 
-// rep fsm
+// Rep FSM
 void processRepFSM() {
   uint32_t now = millis();
 
@@ -232,9 +229,6 @@ void processRepFSM() {
         g_currentRep.peakAngleDeg = g_kinematics.angleDeg;
       }
 
-      // Transition to PEAK when:
-      // 1) Arm reaches peak ROM (>= 70°) and velocity slows down (<= 12°/s), OR
-      // 2) Arm reached peak ROM (>= 68°) and has started descending (< peak - 5° and vel < 0°/s)
       bool reachedPeak = (g_kinematics.angleDeg >= 70.0f && g_kinematics.angularVelocity <= 12.0f);
       bool alreadyDescending = (g_currentRep.peakAngleDeg >= 68.0f && g_kinematics.angleDeg <= (g_currentRep.peakAngleDeg - 5.0f) && g_kinematics.angularVelocity < 0.0f);
 
@@ -244,7 +238,6 @@ void processRepFSM() {
         g_currentRep.concentricDurationSec = (float)(now - g_currentRep.startTimeMs) / 1000.0f;
       }
 
-      // Abort only if arm returns to rest (< 20°) WITHOUT having reached peak ROM
       if (g_kinematics.angleDeg < 20.0f) {
         g_fsmState = STATE_IDLE;
         if (!g_paused && !g_plotterMode) {
@@ -330,7 +323,7 @@ void processRepFSM() {
   }
 }
 
-// serial logging
+// Rep summary logging
 void printRepSummary() {
   if (g_paused || g_plotterMode) return;
 
@@ -367,8 +360,9 @@ void printRepSummary() {
   Serial.println("\r\n=========================================\r\n");
 }
 
+// telemetry
 void printTelemetry() {
-  if (!Serial) return; // Skip serial telemetry entirely when USB host is not connected/reading
+  if (!Serial) return;
   if (g_paused || !g_streamTelemetry) return;
 
   int curBpm = getDisplayBpm();
@@ -414,7 +408,7 @@ void printTelemetry() {
                 coreTemp);
 }
 
-// calibartion
+// calibration
 void calibrateRestPosition() {
   isCalibrated = false;
   Serial.println("\r\n[CALIBRATING] Keep your arm hanging straight and still at your side...");
@@ -440,13 +434,11 @@ void calibrateRestPosition() {
   float avgMvY = sumMvY / SAMPLES;
   float avgMvZ = sumMvZ / SAMPLES;
 
-  // Auto-detect the primary gravity axis and calculate true 0g offsets & sensitivity
   float diffX = fabsf(avgMvX - 1745.0f);
   float diffY = fabsf(avgMvY - 1745.0f);
   float diffZ = fabsf(avgMvZ - 1745.0f);
 
   if (diffZ >= diffX && diffZ >= diffY) {
-    // Z axis carries gravity (standard vertical hang)
     g_zeroG_X_mV = avgMvX;
     g_zeroG_Y_mV = avgMvY;
     g_zeroG_Z_mV = (g_zeroG_X_mV + g_zeroG_Y_mV) / 2.0f;
@@ -455,7 +447,6 @@ void calibrateRestPosition() {
       g_sensitivity_mV_per_g = measuredSens;
     }
   } else if (diffX >= diffY && diffX >= diffZ) {
-    // X axis carries gravity
     g_zeroG_Y_mV = avgMvY;
     g_zeroG_Z_mV = avgMvZ;
     g_zeroG_X_mV = (g_zeroG_Y_mV + g_zeroG_Z_mV) / 2.0f;
@@ -464,7 +455,6 @@ void calibrateRestPosition() {
       g_sensitivity_mV_per_g = measuredSens;
     }
   } else {
-    // Y axis carries gravity
     g_zeroG_X_mV = avgMvX;
     g_zeroG_Z_mV = avgMvZ;
     g_zeroG_Y_mV = (g_zeroG_X_mV + g_zeroG_Z_mV) / 2.0f;
@@ -474,12 +464,10 @@ void calibrateRestPosition() {
     }
   }
 
-  // Lock rest vector in calibrated units
   restX_g = (avgMvX - g_zeroG_X_mV) / g_sensitivity_mV_per_g;
   restY_g = (avgMvY - g_zeroG_Y_mV) / g_sensitivity_mV_per_g;
   restZ_g = (avgMvZ - g_zeroG_Z_mV) / g_sensitivity_mV_per_g;
 
-  // Initialize filter with rest values so there is no initial transient jump
   g_sensor.ax_g = restX_g;
   g_sensor.ay_g = restY_g;
   g_sensor.az_g = restZ_g;
@@ -488,8 +476,8 @@ void calibrateRestPosition() {
   g_sensor.filtered_az = restZ_g;
 
   setNeoPixelColor(0, 40, 0);
-  showOledCalibrating(); // re-render with acquired IP
-  delay(1200);           // Keep IP/calibrating screen comfortably visible
+  showOledCalibrating();
+  delay(1200);
   isCalibrated = true;
   g_fsmState = STATE_IDLE;
   g_kinematics = {0};
@@ -502,6 +490,7 @@ void calibrateRestPosition() {
   Serial.printf("  Rest Vector -> X: %+.2fg, Y: %+.2fg, Z: %+.2fg (Total: %.2fg)\r\n\r\n", restX_g, restY_g, restZ_g, magRest);
 }
 
+// Help menu
 void printHelp() {
   Serial.println();
   Serial.println("=========================================");
@@ -520,7 +509,7 @@ void printHelp() {
   Serial.println();
 }
 
-// web server handling
+// Web server
 void handleRoot() {
   server.send(200, "text/html", INDEX_HTML);
 }
@@ -571,6 +560,99 @@ void handleApiData() {
   server.send(200, "application/json", json);
 }
 
+// ws streaming
+void broadcastWsData(bool forceHistory = false) {
+  if (webSocket.connectedClients() == 0) return;
+
+  const char* stateStr = "IDLE";
+  if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFTING";
+  else if (g_fsmState == STATE_PEAK)  stateStr = "PEAK";
+  else if (g_fsmState == STATE_ECCENTRIC) stateStr = "LOWERING";
+
+  String json = "{";
+  json += "\"angle\":" + String(g_kinematics.angleDeg, 1) + ",";
+  json += "\"vel\":" + String(g_kinematics.angularVelocity, 1) + ",";
+  json += "\"jerk\":" + String(g_kinematics.jerk, 1) + ",";
+  json += "\"q\":" + String(g_kinematics.liveQuality, 1) + ",";
+  json += "\"reps\":" + String(g_repCount) + ",";
+  json += "\"state\":\"" + String(stateStr) + "\",";
+  json += "\"bpm\":" + String(getDisplayBpm()) + ",";
+  json += "\"spo2\":" + String(getDisplaySpo2()) + ",";
+  json += "\"temp\":" + String(getCoreTemp(), 1) + ",";
+  json += "\"finger\":" + String(g_pulseOx.fingerPresent ? "true" : "false") + ",";
+  json += "\"pulseOxConnected\":" + String(g_pulseOx.connected ? "true" : "false") + ",";
+  json += "\"pulseOxStatus\":\"" + String(getPulseOxStatusStr()) + "\",";
+  json += "\"wifiConnected\":" + String((WiFi.status() == WL_CONNECTED) ? "true" : "false") + ",";
+  json += "\"ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("Connecting...")) + "\",";
+  json += "\"sheetsLogging\":" + String(ENABLE_GOOGLE_SHEETS_LOGGING ? "true" : "false");
+
+  bool includeHistory = forceHistory || (g_repCount != s_lastWsRepCount) || (g_repHistoryCount != s_lastWsRepHistoryCount);
+  if (includeHistory) {
+    s_lastWsRepCount = g_repCount;
+    s_lastWsRepHistoryCount = g_repHistoryCount;
+    json += ",\"history\":[";
+    for (size_t i = 0; i < g_repHistoryCount; i++) {
+      if (i > 0) json += ",";
+      String diag = "";
+      if (g_repHistory[i].flagLowROM) diag += "Low ROM ";
+      if (g_repHistory[i].flagFastDrop) diag += "Lowered too fast ";
+      if (g_repHistory[i].flagHighJerk) diag += "Jerky lift ";
+      if (diag.length() == 0) diag = "Clean";
+
+      json += "{\"rep\":" + String(g_repHistory[i].repNumber) + ",";
+      json += "\"q\":" + String(g_repHistory[i].finalQualityFactor, 1) + ",";
+      json += "\"peak\":" + String(g_repHistory[i].peakAngleDeg, 1) + ",";
+      json += "\"con\":" + String(g_repHistory[i].concentricDurationSec, 2) + ",";
+      json += "\"ecc\":" + String(g_repHistory[i].eccentricDurationSec, 2) + ",";
+      json += "\"bpm\":" + String(g_repHistory[i].avgBpm) + ",";
+      json += "\"spo2\":" + String(g_repHistory[i].avgSpo2) + ",";
+      json += "\"diag\":\"" + diag + "\"}";
+    }
+    json += "]";
+  }
+  json += "}";
+
+  webSocket.broadcastTXT(json);
+}
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      break;
+    case WStype_CONNECTED:
+      broadcastWsData(true);
+      break;
+    case WStype_TEXT: {
+      String cmd = "";
+      if (payload && length > 0) {
+        cmd.reserve(length);
+        for (size_t i = 0; i < length; i++) {
+          cmd += (char)payload[i];
+        }
+        cmd.trim();
+      }
+      if (cmd == "calibrate") {
+        calibrateRestPosition();
+      } else if (cmd == "reset") {
+        g_repCount = 0;
+        g_repHistoryCount = 0;
+        g_lastCompletedRep = {0};
+        s_lastWsRepCount = 0;
+        s_lastWsRepHistoryCount = 0;
+        Serial.println("\r\n[RESET] Rep count reset to 0.");
+        broadcastWsData(true);
+      } else if (cmd == "sheets_toggle") {
+        ENABLE_GOOGLE_SHEETS_LOGGING = !ENABLE_GOOGLE_SHEETS_LOGGING;
+        Serial.printf("\r\n[SHEETS] Google Sheets logging toggled: %s\r\n", ENABLE_GOOGLE_SHEETS_LOGGING ? "ENABLED" : "DISABLED");
+        broadcastWsData(false);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 void handleApiCommand() {
   if (server.hasArg("action")) {
     String action = server.arg("action");
@@ -580,19 +662,23 @@ void handleApiCommand() {
       g_repCount = 0;
       g_repHistoryCount = 0;
       g_lastCompletedRep = {0};
+      s_lastWsRepCount = 0;
+      s_lastWsRepHistoryCount = 0;
       Serial.println("\r\n[RESET] Rep count reset to 0.");
+      broadcastWsData(true);
     } else if (action == "sheets_toggle") {
       ENABLE_GOOGLE_SHEETS_LOGGING = !ENABLE_GOOGLE_SHEETS_LOGGING;
       Serial.printf("\r\n[SHEETS] Google Sheets logging toggled: %s\r\n", ENABLE_GOOGLE_SHEETS_LOGGING ? "ENABLED" : "DISABLED");
+      broadcastWsData(false);
     }
   }
   server.send(200, "text/plain", "OK");
 }
 
-
+// Setup
 void setup() {
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0); // Critical: 0ms TX timeout prevents unread USB CDC buffers from blocking loop()
+  Serial.setTxTimeoutMs(0);
 
   pinMode(PIN_XOUT, INPUT);
   pinMode(PIN_YOUT, INPUT);
@@ -602,14 +688,13 @@ void setup() {
 
   setNeoPixelColor(0, 0, 20);
 
-  // Initialize I2C and OLED immediately so boot progress displays on screen
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.setTimeOut(10);
   initOled();
   showOledBootProgress("WiFi");
 
-  // Connect to predefined Wi-Fi station
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.println();
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
@@ -622,6 +707,7 @@ void setup() {
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setSleep(false);
     Serial.println(F("[WIFI] Connected!"));
     Serial.printf("[WIFI] Obtained IP:  %s\r\n", WiFi.localIP().toString().c_str());
     Serial.printf("[WIFI] Gateway:      %s\r\n", WiFi.gatewayIP().toString().c_str());
@@ -630,7 +716,6 @@ void setup() {
     Serial.printf("[WIFI] Could not connect to '%s' within 8s. Continuing in background...\r\n", WIFI_SSID);
   }
 
-  // Web server setup (accessible via obtained local IP)
   showOledBootProgress("Server");
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleApiData);
@@ -640,6 +725,8 @@ void setup() {
     server.send(302, "text/plain", "");
   });
   server.begin();
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
 
   Serial.println();
   Serial.println("=========================================================");
@@ -649,6 +736,7 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("Obtained IP:        %s\r\n", WiFi.localIP().toString().c_str());
     Serial.printf("Dashboard Webpage:  http://%s\r\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WebSocket Server:   ws://%s:81/\r\n", WiFi.localIP().toString().c_str());
   } else {
     Serial.println("Obtained IP:        [Connecting...]");
     Serial.println("Dashboard Webpage:  [Awaiting IP]");
@@ -667,10 +755,12 @@ void setup() {
   calibrateRestPosition();
 }
 
+// Loop
 void loop() {
   uint32_t now = millis();
 
   server.handleClient();
+  webSocket.loop();
   updatePulseOx();
 
   while (Serial.available() > 0) {
@@ -699,7 +789,10 @@ void loop() {
         g_repCount = 0;
         g_repHistoryCount = 0;
         g_lastCompletedRep = {0};
+        s_lastWsRepCount = 0;
+        s_lastWsRepHistoryCount = 0;
         Serial.println("\r\n[RESET] Rep count reset to 0.");
+        broadcastWsData(true);
         break;
       case 'o':
       case 'O':
@@ -725,7 +818,7 @@ void loop() {
         break;
       case 'w':
       case 'W':
-        triggerIpScreen(5000); // Also show IP on OLED display
+        triggerIpScreen(5000);
         Serial.println("\r\n=========================================");
         Serial.println("              Wi-Fi Status               ");
         Serial.println("=========================================");
@@ -758,7 +851,7 @@ void loop() {
     }
   }
 
-  // movement detection loop
+  // Kinematics loop
   if (now - g_lastSampleTimeMs >= SAMPLE_INTERVAL_MS) {
     uint32_t sampleStartUs = micros();
     float dt_sec = (float)(now - g_lastSampleTimeMs) / 1000.0f;
@@ -773,22 +866,29 @@ void loop() {
     PerfDebug::recordKinematicsTiming(dt_sec * 1000.0f, micros() - sampleStartUs);
   }
 
-  // slower telemtry loop
+  // Telemetry loop
   if (now - g_lastTelemetryPrintMs >= 100) {
     g_lastTelemetryPrintMs = now;
     printTelemetry();
   }
 
-  // Touch 11 (GPIO 11 / ADC2_CH0) sensor check for displaying IP on OLED
+  // WebSocket broadcast (20 Hz)
+  static uint32_t s_lastWsBroadcastMs = 0;
+  if (now - s_lastWsBroadcastMs >= 50) {
+    s_lastWsBroadcastMs = now;
+    broadcastWsData();
+  }
+
+  // Touch IP check
   static uint32_t s_lastTouchCheckMs = 0;
   static bool s_lastTouchState = false;
   if (now - s_lastTouchCheckMs >= 60) {
     s_lastTouchCheckMs = now;
     bool isTouched = checkTouchIpSensor();
     if (isTouched) {
-      triggerIpScreen(4000); // Display IP screen for 4 seconds after touch
+      triggerIpScreen(4000);
       if (!s_lastTouchState) {
-        setNeoPixelColor(0, 20, 40); // Cyan visual indicator
+        setNeoPixelColor(0, 20, 40);
         Serial.printf("\r\n[TOUCH] Touch 11 (GPIO 11) detected! (Val: %u, Base: %u) -> Showing IP on OLED: %s\r\n",
                       g_lastTouchVal, g_touchBaseline,
                       (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString().c_str() : "[Connecting...]");

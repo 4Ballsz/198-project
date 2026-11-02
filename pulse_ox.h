@@ -8,7 +8,7 @@
 #include "spo2_algorithm.h"
 #include "config.h"
 
-// Global pulse oximeter state
+// Vitals state
 inline PulseOxState g_pulseOx = {
   .connected = false,
   .fingerPresent = false,
@@ -29,7 +29,6 @@ inline volatile float g_coreTemp = 25.0f;
 inline float getCoreTemp() { return g_coreTemp; }
 
 inline MAX30105 g_pulseSensor;
-
 inline TaskHandle_t g_pulseOxTaskHandle = NULL;
 
 namespace {
@@ -40,6 +39,7 @@ namespace {
   uint32_t s_lastSheetsPostMs = 0;
 }
 
+// Google Sheets background task
 struct SheetsPayload {
   int bpm;
   int spo2;
@@ -72,6 +72,7 @@ inline void sheetsTask(void* param) {
   vTaskDelete(NULL);
 }
 
+// Google Sheets trigger
 inline void triggerGoogleSheetsPost(int bpm, int spo2) {
   if (!ENABLE_GOOGLE_SHEETS_LOGGING) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -85,7 +86,6 @@ inline void triggerGoogleSheetsPost(int bpm, int spo2) {
   s_sheetsTaskRunning = true;
   s_lastSheetsPostMs = now;
   SheetsPayload* p = new SheetsPayload{bpm, spo2};
-  // Allocate 12KB stack for sheets_task to support mbedTLS / HTTPS handshake and redirect buffers
   BaseType_t res = xTaskCreatePinnedToCore(sheetsTask, "sheets_task", 12288, p, 1, NULL, 0);
   if (res != pdPASS) {
     delete p;
@@ -94,6 +94,7 @@ inline void triggerGoogleSheetsPost(int bpm, int spo2) {
   }
 }
 
+// Reset readings
 inline void resetPulseOxReadings() {
   s_pulseOxSamples = 0;
   g_pulseOx.haveBpm = false;
@@ -102,6 +103,7 @@ inline void resetPulseOxReadings() {
   g_pulseOx.latestSpo2Valid = false;
 }
 
+// Calculate readings
 inline void calculatePulseOxReadings() {
   int32_t rawBpm = 0;
   int32_t rawSpo2 = 0;
@@ -132,7 +134,6 @@ inline void calculatePulseOxReadings() {
 
   uint32_t now = millis();
 
-  // Smooth accepted readings, restarting after a long gap
   if (g_pulseOx.latestBpmValid) {
     if (!g_pulseOx.haveBpm || (now - g_pulseOx.lastBpmTime >= PULSE_OX_KEEP_LAST_MS)) {
       g_pulseOx.bpm = (float)rawBpm;
@@ -157,7 +158,6 @@ inline void calculatePulseOxReadings() {
     triggerGoogleSheetsPost((int)(g_pulseOx.bpm + 0.5f), (int)(g_pulseOx.spo2 + 0.5f));
   }
 
-  // Slide buffer: retain 3 seconds (75 samples) and collect 1 second (25 samples) of new data
   for (int i = PULSE_OX_STEP; i < PULSE_OX_WINDOW; i++) {
     s_irBuffer[i - PULSE_OX_STEP] = s_irBuffer[i];
     s_redBuffer[i - PULSE_OX_STEP] = s_redBuffer[i];
@@ -168,9 +168,10 @@ inline void calculatePulseOxReadings() {
 bool initOled();
 void updateOledScreen();
 
+// Pulse oximeter background task
 inline void pulseOxTask(void* pvParameters) {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  Wire.setTimeOut(10); // 10ms short timeout to prevent bus blocking
+  Wire.setTimeOut(10);
   initOled();
 
   uint32_t lastTempRead = 0;
@@ -178,8 +179,6 @@ inline void pulseOxTask(void* pvParameters) {
   while (true) {
     uint32_t now = millis();
 
-    // Read chip temperature on Core 0 ONLY when arm is idle, at most once every 5 seconds
-    // to strictly prevent SAR ADC contention with Core 1 accelerometer sampling
     if ((now - lastTempRead >= 5000) && (g_fsmState == STATE_IDLE)) {
       lastTempRead = now;
       float t = temperatureRead();
@@ -189,7 +188,6 @@ inline void pulseOxTask(void* pvParameters) {
     }
 
     if (!g_pulseOx.connected) {
-      // First try configured pins (SDA=3, SCL=4)
       Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
       Wire.setTimeOut(10);
       Wire.beginTransmission(0x57);
@@ -200,7 +198,6 @@ inline void pulseOxTask(void* pvParameters) {
         g_pulseOx.connected = true;
         Serial.println(F("[PULSE OX] MAX30105 sensor connected and initialized (pins 3 & 4)!"));
       } else {
-        // Fallback to reference pins (SDA=1, SCL=2)
         Wire.begin(1, 2);
         Wire.setTimeOut(10);
         Wire.beginTransmission(0x57);
@@ -257,12 +254,12 @@ inline void pulseOxTask(void* pvParameters) {
     }
 
     updateOledScreen();
-    vTaskDelay(pdMS_TO_TICKS(40)); // 25Hz poll rate for sensor FIFO
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
 }
 
+// Initialize pulse oximeter
 inline bool initPulseOx() {
-  // Launch background task on Core 0 so it never interferes with Core 1 rep kinematics
   if (g_pulseOxTaskHandle == NULL) {
     xTaskCreatePinnedToCore(
       pulseOxTask,
@@ -278,9 +275,9 @@ inline bool initPulseOx() {
 }
 
 inline void updatePulseOx() {
-  // Handled fully asynchronously by pulseOxTask on Core 0!
 }
 
+// Vitals accessors
 inline int getDisplayBpm() {
   uint32_t now = millis();
   if (g_pulseOx.haveBpm && (now - g_pulseOx.lastBpmTime < PULSE_OX_KEEP_LAST_MS)) {

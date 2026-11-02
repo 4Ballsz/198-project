@@ -1,3 +1,4 @@
+// TODO: Only include the minimized version of website... current code takes almost the full flash
 #pragma once
 
 #include <Arduino.h>
@@ -8,7 +9,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Motion Monitor</title>
+  <title>Motion</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -129,6 +130,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
 
   <div class="stats-bar">
+    <div class="stat-item"><span class="stat-label">Feed:</span> <span class="stat-val" id="wsStatus" style="color: #ca8a04;">○ Connecting...</span></div>
     <div class="stat-item"><span class="stat-label">Reps:</span> <span class="stat-val" id="valReps">0</span></div>
     <div class="stat-item"><span class="stat-label">State:</span> <span class="stat-val" id="valState">IDLE</span></div>
     <div class="stat-item"><span class="stat-label">Angle:</span> <span class="stat-val" id="valAngle">0°</span></div>
@@ -271,81 +273,126 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       ctx.stroke();
     }
 
-    async function pollData() {
-      try {
-        const res = await fetch('/api/data');
-        if (!res.ok) return;
-        const d = await res.json();
+    function applyData(d) {
+      if (d.reps !== undefined) document.getElementById('valReps').innerText = d.reps;
+      if (d.state !== undefined) document.getElementById('valState').innerText = d.state;
+      if (d.angle !== undefined) document.getElementById('valAngle').innerText = d.angle.toFixed(1) + '°';
+      if (d.vel !== undefined) document.getElementById('valVel').innerText = (d.vel >= 0 ? '+' : '') + d.vel.toFixed(1) + '°/s';
+      if (d.jerk !== undefined) document.getElementById('valJerk').innerText = d.jerk.toFixed(1);
 
-        document.getElementById('valReps').innerText = d.reps;
-        document.getElementById('valState').innerText = d.state;
-        document.getElementById('valAngle').innerText = d.angle.toFixed(1) + '°';
-        document.getElementById('valVel').innerText = (d.vel >= 0 ? '+' : '') + d.vel.toFixed(1) + '°/s';
-        document.getElementById('valJerk').innerText = d.jerk.toFixed(1);
-
+      if (d.q !== undefined) {
         const qEl = document.getElementById('valQ');
         qEl.innerText = d.q.toFixed(0) + '%';
         if (d.q >= 75) qEl.style.color = '#16a34a';
         else if (d.q >= 50) qEl.style.color = '#ca8a04';
         else qEl.style.color = '#dc2626';
+      }
 
-        document.getElementById('valBpm').innerText = (d.bpm && d.bpm > 0) ? (d.bpm + ' bpm') : '--';
-        document.getElementById('valSpo2').innerText = (d.spo2 && d.spo2 > 0) ? (d.spo2 + '%') : '--';
-        document.getElementById('valPulseOx').innerText = d.pulseOxStatus || (d.pulseOxConnected ? 'Active' : 'Disconnected');
+      if (d.bpm !== undefined) {
+        document.getElementById('valBpm').innerText = (d.bpm > 0) ? (d.bpm + ' bpm') : '--';
+      }
+      if (d.spo2 !== undefined) {
+        document.getElementById('valSpo2').innerText = (d.spo2 > 0) ? (d.spo2 + '%') : '--';
+      }
+      if (d.pulseOxStatus !== undefined) {
+        document.getElementById('valPulseOx').innerText = d.pulseOxStatus;
+      }
 
-        if (d.temp !== undefined) {
-          document.getElementById('valTemp').innerText = d.temp.toFixed(1) + '°C';
-        }
+      if (d.temp !== undefined) {
+        document.getElementById('valTemp').innerText = d.temp.toFixed(1) + '°C';
+      }
 
+      if (d.angle !== undefined) {
         angleHistory.shift();
         angleHistory.push(d.angle);
         qHistory.shift();
-        qHistory.push(d.q);
+        qHistory.push(d.q || 100);
         hrHistory.shift();
         hrHistory.push(d.bpm || 0);
         spo2History.shift();
         spo2History.push(d.spo2 || 0);
         drawChart();
+      }
 
-        // Update Rep History List
-        if (d.history && d.history.length !== renderedRepCount) {
-          const tbody = document.getElementById('repTableBody');
-          tbody.innerHTML = '';
-          d.history.forEach(r => {
-            const tr = document.createElement('tr');
-            const hrStr = (r.bpm && r.bpm > 0) ? `${r.bpm} bpm / ${r.spo2}%` : '--';
-            tr.innerHTML = `
-              <td><b>${r.rep}</b></td>
-              <td>${r.q.toFixed(1)}%</td>
-              <td>${r.peak.toFixed(1)}°</td>
-              <td>${r.con.toFixed(2)}s</td>
-              <td>${r.ecc.toFixed(2)}s</td>
-              <td>${hrStr}</td>
-              <td>${r.diag}</td>
-            `;
-            tbody.appendChild(tr);
-          });
-          renderedRepCount = d.history.length;
-          const scrollBox = document.querySelector('.history-scroll');
-          scrollBox.scrollTop = scrollBox.scrollHeight;
-        } else if (d.history && d.history.length === 0 && renderedRepCount > 0) {
-          document.getElementById('repTableBody').innerHTML = '';
-          renderedRepCount = 0;
-        }
-      } catch (err) {}
+      // Update Rep History List when present in payload
+      if (d.history) {
+        const tbody = document.getElementById('repTableBody');
+        tbody.innerHTML = '';
+        d.history.forEach(r => {
+          const tr = document.createElement('tr');
+          const hrStr = (r.bpm && r.bpm > 0) ? `${r.bpm} bpm / ${r.spo2}%` : '--';
+          tr.innerHTML = `
+            <td><b>${r.rep}</b></td>
+            <td>${r.q.toFixed(1)}%</td>
+            <td>${r.peak.toFixed(1)}°</td>
+            <td>${r.con.toFixed(2)}s</td>
+            <td>${r.ecc.toFixed(2)}s</td>
+            <td>${hrStr}</td>
+            <td>${r.diag}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+        renderedRepCount = d.history.length;
+        const scrollBox = document.querySelector('.history-scroll');
+        if (scrollBox) scrollBox.scrollTop = scrollBox.scrollHeight;
+      }
     }
 
-    async function sendCommand(cmd) {
+    let ws = null;
+    let reconnectTimeout = null;
+
+    function initWebSocket() {
+      const statusEl = document.getElementById('wsStatus');
+      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':81/';
+
       try {
-        await fetch('/api/cmd?action=' + cmd);
-        if (cmd === 'reset') {
-          renderedRepCount = 0;
-          document.getElementById('repTableBody').innerHTML = '';
-        }
-      } catch (e) {}
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          if (statusEl) {
+            statusEl.innerText = '● Live';
+            statusEl.style.color = '#16a34a';
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const d = JSON.parse(event.data);
+            applyData(d);
+          } catch (e) {}
+        };
+
+        ws.onclose = () => {
+          if (statusEl) {
+            statusEl.innerText = '○ Reconnecting...';
+            statusEl.style.color = '#ca8a04';
+          }
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = setTimeout(initWebSocket, 1500);
+        };
+
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+      } catch (err) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = setTimeout(initWebSocket, 2000);
+      }
     }
 
-    setInterval(pollData, 100);
+    function sendCommand(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+      } else {
+        fetch('/api/cmd?action=' + cmd).catch(() => {});
+      }
+      if (cmd === 'reset') {
+        renderedRepCount = 0;
+        document.getElementById('repTableBody').innerHTML = '';
+      }
+    }
+
+    window.addEventListener('load', initWebSocket);
   </script>
 </body>
 </html>

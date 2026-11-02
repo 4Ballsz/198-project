@@ -15,7 +15,7 @@
 
 namespace PerfDebug {
 
-// FreeRTOS idle tick counters (counted via idle hooks)
+// Idle counters
 static volatile uint32_t s_idleTicksCore0 = 0;
 static volatile uint32_t s_idleTicksCore1 = 0;
 
@@ -29,7 +29,7 @@ static bool IRAM_ATTR idleHookCore1() {
   return true;
 }
 
-// Timing & Kinematics performance tracking
+// Kinematics tracking
 static uint64_t s_lastTotalTimeUs = 0;
 static uint32_t s_lastIdleTime0Us = 0;
 static uint32_t s_lastIdleTime1Us = 0;
@@ -41,6 +41,7 @@ static float s_lastKinematicsDtMs = 20.0f;
 static uint32_t s_lastKinematicsExecUs = 0;
 static uint32_t s_maxKinematicsExecUs = 0;
 
+// Idle hooks initialization
 inline void initPerfHooks() {
   esp_register_freertos_idle_hook_for_cpu(idleHookCore0, 0);
   esp_register_freertos_idle_hook_for_cpu(idleHookCore1, 1);
@@ -59,6 +60,7 @@ inline void recordKinematicsTiming(float dtMs, uint32_t execUs) {
   }
 }
 
+// Performance report
 inline void printPerformanceReport() {
   uint64_t nowTotalUs = esp_timer_get_time();
   uint32_t nowIdle0Us = (uint32_t)ulTaskGetIdleRunTimeCounterForCore(0);
@@ -92,12 +94,11 @@ inline void printPerformanceReport() {
   float loadPct0 = 100.0f - idlePct0;
   float loadPct1 = 100.0f - idlePct1;
 
-  // Clock frequencies
+  // Clocks & memory
   uint32_t cpuFreqMhz = getCpuFrequencyMhz();
   uint32_t apbFreqMhz = getApbFrequency() / 1000000;
   uint32_t xtalFreqMhz = getXtalFrequencyMhz();
 
-  // Heap metrics
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
   uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
@@ -106,18 +107,15 @@ inline void printPerformanceReport() {
     heapFrag = 100.0f - (((float)maxAllocHeap * 100.0f) / (float)freeHeap);
   }
 
-  // Task stack watermarks
   UBaseType_t loopTaskWatermark = uxTaskGetStackHighWaterMark(NULL);
   UBaseType_t pulseOxWatermark = (g_pulseOxTaskHandle != NULL) ? uxTaskGetStackHighWaterMark(g_pulseOxTaskHandle) : 0;
 
-  // Wi-Fi Station info
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   String staIP = wifiConnected ? WiFi.localIP().toString() : "Not Connected";
   String staMac = WiFi.macAddress();
   int32_t channel = WiFi.channel();
   int8_t rssi = wifiConnected ? WiFi.RSSI() : 0;
 
-  // Print structured debug banner
   Serial.println();
   Serial.println(F("+-----------------------------------------------------------------------+"));
   Serial.println(F("|                  ESP32-S3 PERFORMANCE & SYSTEM DEBUG                  |"));
@@ -147,8 +145,9 @@ inline void printPerformanceReport() {
   Serial.println();
 }
 
+// Update and toggle
 inline void update(bool plotterMode) {
-  if (!Serial) return; // Do not format or send debug reports when USB Serial is disconnected
+  if (!Serial) return;
   if (!g_perfMetricsEnabled || plotterMode) return;
   uint32_t now = millis();
   if (now - s_lastPerfPrintMs >= PERF_METRICS_INTERVAL_MS) {
@@ -167,16 +166,17 @@ inline void toggle() {
 
 } // namespace PerfDebug
 
-#else // ENABLE_PERF_METRICS == false
+#else
 
+// Disabled metrics fallback
 namespace PerfDebug {
   inline void initPerfHooks() {}
   inline void recordKinematicsTiming(float, uint32_t) {}
   inline void printPerformanceReport() {}
   inline void update(bool) {}
   inline void toggle() {
-    Serial.println(F("\r\n[PERF DEBUG] Performance metrics are disabled at compile time (ENABLE_PERF_METRICS = false)."));
+    Serial.println(F("\r\n[PERF DEBUG] Performance metrics are disabled at compile time."));
   }
 } // namespace PerfDebug
 
-#endif // ENABLE_PERF_METRICS
+#endif
