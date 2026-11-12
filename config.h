@@ -27,11 +27,11 @@ constexpr int PULSE_OX_STEP = 25;
 // Google Sheets logging
 inline bool ENABLE_GOOGLE_SHEETS_LOGGING = true;
 constexpr uint32_t GOOGLE_SHEETS_INTERVAL_MS = 4000;
-inline const char* GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyzcXk4FWmBvlb6RsSljxVULBs5ChiWCWNIGrziJ0jxOcqpO5qaLjaDzPLRjkRizWtAbg/exec";
+inline const char* GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyFkQOzMYgYU8nC_iBMDek3Dhe4VChAXHswgytS0Cue5-QH8Kif0gpI0xFMC4RfNqIUGQ/exec";
 
 // Wi-Fi credentials
-inline const char* WIFI_SSID = "Pixel_7267";
-inline const char* WIFI_PASS = "thyshalldata";
+inline const char* WIFI_SSID = "Iphone Ivanna";
+inline const char* WIFI_PASS = "5261769199";
 
 // SoftAP fallback
 inline const char* AP_SSID = "esp32ap";
@@ -51,6 +51,17 @@ enum FsmState {
   STATE_COMPLETED
 };
 
+// Exercises
+enum ExerciseType {
+  EXERCISE_CURL,   // tracked by forearm angle
+  EXERCISE_PRESS   // shoulder press, tracked by vertical movement
+};
+
+inline const char* exerciseName(ExerciseType ex) {
+  return (ex == EXERCISE_PRESS) ? "Shoulder Press" : "Bicep Curl";
+}
+
+extern ExerciseType g_exercise;
 extern volatile FsmState g_fsmState;
 extern uint32_t g_repCount;
 extern bool isCalibrated;
@@ -71,6 +82,10 @@ struct KinematicsState {
   float angularVelocity;
   float jerk;
   float liveQuality;
+  float upAccel;     // vertical acceleration with gravity removed, g (+ = up)
+  float upVelocity;  // vertical speed, m/s (+ = up)
+  float heightCm;    // height gained since the rep started, cm
+  float sideAccel;   // acceleration off the vertical, g (sway or tilt)
 };
 
 struct PulseOxState {
@@ -97,6 +112,8 @@ struct RepMetrics {
   float concentricDurationSec;
   float eccentricDurationSec;
   float peakAngleDeg;
+  float peakHeightCm;
+  ExerciseType exercise;
   float qualitySum;
   uint32_t qualitySampleCount;
   float finalQualityFactor;

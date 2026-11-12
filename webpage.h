@@ -132,8 +132,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="stats-bar">
     <div class="stat-item"><span class="stat-label">Feed:</span> <span class="stat-val" id="wsStatus" style="color: #ca8a04;">○ Connecting...</span></div>
     <div class="stat-item"><span class="stat-label">Reps:</span> <span class="stat-val" id="valReps">0</span></div>
+    <div class="stat-item"><span class="stat-label">Exercise:</span> <span class="stat-val" id="valExercise">Bicep Curl</span></div>
     <div class="stat-item"><span class="stat-label">State:</span> <span class="stat-val" id="valState">IDLE</span></div>
-    <div class="stat-item"><span class="stat-label">Angle:</span> <span class="stat-val" id="valAngle">0°</span></div>
+    <div class="stat-item"><span class="stat-label" id="lblMotion">Angle:</span> <span class="stat-val" id="valAngle">0°</span></div>
     <div class="stat-item"><span class="stat-label">Velocity:</span> <span class="stat-val" id="valVel">0°/s</span></div>
     <div class="stat-item"><span class="stat-label">Q:</span> <span class="stat-val" id="valQ" style="color: #16a34a;">100%</span></div>
     <div class="stat-item"><span class="stat-label">Jerk:</span> <span class="stat-val" id="valJerk">0.0</span></div>
@@ -145,7 +146,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <div class="chart-box">
     <div class="chart-legend">
-      <span><span class="legend-tag" style="background: #0284c7;"></span>Angle (0-140°)</span>
+      <span><span class="legend-tag" style="background: #0284c7;"></span><span id="legendMotion">Angle (0-140°)</span></span>
       <span><span class="legend-tag" style="background: #16a34a;"></span>Quality Q (0-100%)</span>
       <span><span class="legend-tag" style="background: #ef4444;"></span>HR (0-200 bpm)</span>
       <span><span class="legend-tag" style="background: #06b6d4;"></span>SpO2 (0-100%)</span>
@@ -156,6 +157,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="controls">
     <button onclick="sendCommand('calibrate')">Calibrate</button>
     <button onclick="sendCommand('reset')">Reset</button>
+    <button onclick="sendCommand('exercise_toggle')">Switch Exercise</button>
   </div>
 
   <div class="history-box">
@@ -184,7 +186,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     const ctx = canvas.getContext('2d');
 
     const MAX_POINTS = 120;
-    const angleHistory = new Array(MAX_POINTS).fill(0);
+    const motionHistory = new Array(MAX_POINTS).fill(0); // angle or height, as a fraction of the chart
     const qHistory = new Array(MAX_POINTS).fill(100);
     const hrHistory = new Array(MAX_POINTS).fill(0);
     const spo2History = new Array(MAX_POINTS).fill(0);
@@ -260,13 +262,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
       ctx.stroke();
 
-      // Angle (Blue)
+      // Angle or height (Blue)
       ctx.strokeStyle = '#0284c7';
       ctx.lineWidth = 2;
       ctx.beginPath();
       for (let i = 0; i < MAX_POINTS; i++) {
         const x = (i / (MAX_POINTS - 1)) * w;
-        const y = h - (angleHistory[i] / 140) * (h - 20) - 10;
+        const y = h - motionHistory[i] * (h - 20) - 10;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -276,8 +278,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function applyData(d) {
       if (d.reps !== undefined) document.getElementById('valReps').innerText = d.reps;
       if (d.state !== undefined) document.getElementById('valState').innerText = d.state;
-      if (d.angle !== undefined) document.getElementById('valAngle').innerText = d.angle.toFixed(1) + '°';
-      if (d.vel !== undefined) document.getElementById('valVel').innerText = (d.vel >= 0 ? '+' : '') + d.vel.toFixed(1) + '°/s';
+      const isPress = d.exercise === 'press';
+      if (d.exercise !== undefined) {
+        document.getElementById('valExercise').innerText = isPress ? 'Shoulder Press' : 'Bicep Curl';
+        document.getElementById('lblMotion').innerText = isPress ? 'Height:' : 'Angle:';
+        document.getElementById('legendMotion').innerText = isPress ? 'Height (0-50 cm)' : 'Angle (0-140°)';
+      }
+      if (isPress && d.height !== undefined) {
+        document.getElementById('valAngle').innerText = d.height.toFixed(0) + ' cm';
+      } else if (d.angle !== undefined) {
+        document.getElementById('valAngle').innerText = d.angle.toFixed(1) + '°';
+      }
+      if (isPress && d.upVel !== undefined) {
+        document.getElementById('valVel').innerText = (d.upVel >= 0 ? '+' : '') + d.upVel.toFixed(2) + ' m/s';
+      } else if (d.vel !== undefined) {
+        document.getElementById('valVel').innerText = (d.vel >= 0 ? '+' : '') + d.vel.toFixed(1) + '°/s';
+      }
       if (d.jerk !== undefined) document.getElementById('valJerk').innerText = d.jerk.toFixed(1);
 
       if (d.q !== undefined) {
@@ -303,8 +319,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
 
       if (d.angle !== undefined) {
-        angleHistory.shift();
-        angleHistory.push(d.angle);
+        motionHistory.shift();
+        motionHistory.push(isPress ? (d.height || 0) / 50 : d.angle / 140);
         qHistory.shift();
         qHistory.push(d.q || 100);
         hrHistory.shift();
@@ -324,7 +340,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           tr.innerHTML = `
             <td><b>${r.rep}</b></td>
             <td>${r.q.toFixed(1)}%</td>
-            <td>${r.peak.toFixed(1)}°</td>
+            <td>${r.peak.toFixed(1)}${r.ex === 'press' ? ' cm' : '°'}</td>
             <td>${r.con.toFixed(2)}s</td>
             <td>${r.ecc.toFixed(2)}s</td>
             <td>${hrStr}</td>

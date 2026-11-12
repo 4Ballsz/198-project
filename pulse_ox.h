@@ -43,6 +43,7 @@ namespace {
 struct SheetsPayload {
   int bpm;
   int spo2;
+  int reps;
 };
 
 inline void sheetsTask(void* param) {
@@ -54,12 +55,12 @@ inline void sheetsTask(void* param) {
     if (http.begin(GOOGLE_SHEETS_URL)) {
       http.addHeader("Content-Type", "application/json");
 
-      String jsonPayload = "{\"bpm\":" + String(p->bpm) + ",\"spo2\":" + String(p->spo2) + "}";
+      String jsonPayload = "{\"bpm\":" + String(p->bpm) + ",\"spo2\":" + String(p->spo2) + ",\"reps\":" + String(p->reps) + "}";
       int httpResponseCode = http.POST(jsonPayload);
       if (httpResponseCode > 0) {
-        Serial.printf("[SHEETS] Vitals uploaded (BPM: %d, SpO2: %d%%). HTTP: %d\r\n", p->bpm, p->spo2, httpResponseCode);
+        Serial.printf("[SHEETS] Uploaded (BPM: %d, SpO2: %d%%, Reps: %d). HTTP: %d\r\n", p->bpm, p->spo2, p->reps, httpResponseCode);
       } else {
-        Serial.printf("[SHEETS] Error uploading vitals. Code: %d (%s)\r\n", httpResponseCode, http.errorToString(httpResponseCode).c_str());
+        Serial.printf("[SHEETS] Error uploading data. Code: %d (%s)\r\n", httpResponseCode, http.errorToString(httpResponseCode).c_str());
       }
       http.end();
     } else {
@@ -72,26 +73,28 @@ inline void sheetsTask(void* param) {
   vTaskDelete(NULL);
 }
 
-// Google Sheets trigger
-inline void triggerGoogleSheetsPost(int bpm, int spo2) {
-  if (!ENABLE_GOOGLE_SHEETS_LOGGING) return;
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (!GOOGLE_SHEETS_URL || strlen(GOOGLE_SHEETS_URL) == 0) return;
+// Google Sheets trigger (returns true if an upload was started)
+inline bool triggerGoogleSheetsPost(int bpm, int spo2, int reps) {
+  if (!ENABLE_GOOGLE_SHEETS_LOGGING) return false;
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!GOOGLE_SHEETS_URL || strlen(GOOGLE_SHEETS_URL) == 0) return false;
 
   uint32_t now = millis();
   if (s_sheetsTaskRunning || (now - s_lastSheetsPostMs < GOOGLE_SHEETS_INTERVAL_MS)) {
-    return;
+    return false;
   }
 
   s_sheetsTaskRunning = true;
   s_lastSheetsPostMs = now;
-  SheetsPayload* p = new SheetsPayload{bpm, spo2};
+  SheetsPayload* p = new SheetsPayload{bpm, spo2, reps};
   BaseType_t res = xTaskCreatePinnedToCore(sheetsTask, "sheets_task", 12288, p, 1, NULL, 0);
   if (res != pdPASS) {
     delete p;
     s_sheetsTaskRunning = false;
     Serial.println(F("[SHEETS] Failed to spawn sheets_task (insufficient heap)!"));
+    return false;
   }
+  return true;
 }
 
 // Reset readings
@@ -154,10 +157,6 @@ inline void calculatePulseOxReadings() {
     g_pulseOx.lastSpo2Time = now;
   }
 
-  if (g_pulseOx.latestBpmValid && g_pulseOx.latestSpo2Valid) {
-    triggerGoogleSheetsPost((int)(g_pulseOx.bpm + 0.5f), (int)(g_pulseOx.spo2 + 0.5f));
-  }
-
   for (int i = PULSE_OX_STEP; i < PULSE_OX_WINDOW; i++) {
     s_irBuffer[i - PULSE_OX_STEP] = s_irBuffer[i];
     s_redBuffer[i - PULSE_OX_STEP] = s_redBuffer[i];
@@ -167,6 +166,20 @@ inline void calculatePulseOxReadings() {
 
 bool initOled();
 void updateOledScreen();
+inline int getDisplayBpm();
+inline int getDisplaySpo2();
+
+// Google Sheets upload, independent of whether the pulse reading is valid
+inline void updateGoogleSheets() {
+  static uint32_t s_lastSentReps = 0;
+  int bpm = getDisplayBpm();
+  uint32_t reps = g_repCount;
+  if (bpm > 0 || reps != s_lastSentReps) {
+    if (triggerGoogleSheetsPost(bpm, getDisplaySpo2(), (int)reps)) {
+      s_lastSentReps = reps;
+    }
+  }
+}
 
 // Pulse oximeter background task
 inline void pulseOxTask(void* pvParameters) {
@@ -186,6 +199,9 @@ inline void pulseOxTask(void* pvParameters) {
         g_coreTemp = t;
       }
     }
+
+    // Runs even when the pulse sensor is missing, so reps still upload
+    updateGoogleSheets();
 
     if (!g_pulseOx.connected) {
       Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);

@@ -220,6 +220,10 @@ inline void updateOledScreen() {
   g_oled.setCursor(0, 0);
   g_oled.printf("REPS: %u", (unsigned int)g_repCount);
 
+  bool isPress = (g_exercise == EXERCISE_PRESS);
+  g_oled.setCursor(62, 0);
+  g_oled.print(isPress ? "PRESS" : "CURL");
+
   const char* stateStr = "IDLE";
   if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFT";
   else if (g_fsmState == STATE_PEAK)  stateStr = "PEAK";
@@ -234,7 +238,11 @@ inline void updateOledScreen() {
 
   // Live kinematics
   g_oled.setCursor(0, 13);
-  g_oled.printf("Ang: %4.1f\xF7", g_kinematics.angleDeg);
+  if (isPress) {
+    g_oled.printf("Ht: %4.0fcm", g_kinematics.heightCm);
+  } else {
+    g_oled.printf("Ang: %4.1f\xF7", g_kinematics.angleDeg);
+  }
 
   g_oled.setCursor(76, 13);
   g_oled.printf("Q: %3.0f%%", g_kinematics.liveQuality);
@@ -242,17 +250,24 @@ inline void updateOledScreen() {
   g_oled.drawFastHLine(0, 23, 128, SSD1306_WHITE);
 
   // Vitals
-  int curBpm = getDisplayBpm();
-  int curSpo2 = getDisplaySpo2();
+  static const uint32_t countdownStartMs = now;
+  const uint32_t elapsedMs = now - countdownStartMs;
 
   g_oled.setCursor(0, 26);
-  if (curBpm > 0 && curSpo2 > 0) {
-    g_oled.printf("HR: %3d bpm", curBpm);
-    g_oled.setCursor(76, 26);
-    g_oled.printf("O2: %2d%%", curSpo2);
+  if (elapsedMs < 10000UL) {
+    const unsigned int secondsLeft = (10000UL - elapsedMs + 999UL) / 1000UL;
+    g_oled.printf("HR: Wait %us", secondsLeft);
   } else {
-    const char* oxStat = getPulseOxStatusStr();
-    g_oled.printf("HR: %s", oxStat);
+    int curBpm = getDisplayBpm();
+    int curSpo2 = getDisplaySpo2();
+
+    if (curBpm > 0 && curSpo2 > 0) {
+      g_oled.printf("HR: %3d bpm", curBpm);
+      g_oled.setCursor(76, 26);
+      g_oled.printf("O2: %2d%%", curSpo2);
+    } else {
+      g_oled.printf("HR: %s", getPulseOxStatusStr());
+    }
   }
 
   g_oled.drawFastHLine(0, 36, 128, SSD1306_WHITE);
@@ -263,19 +278,27 @@ inline void updateOledScreen() {
 
   if (g_lastCompletedRep.repNumber > 0) {
     g_oled.setCursor(76, 39);
-    g_oled.printf("Pk: %2.0f\xF7", g_lastCompletedRep.peakAngleDeg);
+    if (g_lastCompletedRep.exercise == EXERCISE_PRESS) {
+      g_oled.printf("Pk: %2.0fcm", g_lastCompletedRep.peakHeightCm);
+    } else {
+      g_oled.printf("Pk: %2.0f\xF7", g_lastCompletedRep.peakAngleDeg);
+    }
   }
 
-  // Curl angle gauge
+  // Gauge: curl angle (target 70 deg of 90) or press height (target 30 cm of 40)
+  float gaugeValue = isPress ? g_kinematics.heightCm : g_kinematics.angleDeg;
+  float gaugeMax = isPress ? 40.0f : 90.0f;
+  float gaugeTarget = isPress ? 30.0f : 70.0f;
+
   g_oled.drawRect(0, 52, 128, 11, SSD1306_WHITE);
-  int fillWidth = (int)((g_kinematics.angleDeg / 90.0f) * 122.0f);
+  int fillWidth = (int)((gaugeValue / gaugeMax) * 122.0f);
   if (fillWidth > 122) fillWidth = 122;
   if (fillWidth < 0) fillWidth = 0;
   if (fillWidth > 0) {
     g_oled.fillRect(3, 55, fillWidth, 5, SSD1306_WHITE);
   }
 
-  int peakMarkerX = 3 + (int)((70.0f / 90.0f) * 122.0f);
+  int peakMarkerX = 3 + (int)((gaugeTarget / gaugeMax) * 122.0f);
   g_oled.drawFastVLine(peakMarkerX, 52, 3, SSD1306_WHITE);
   g_oled.drawFastVLine(peakMarkerX, 60, 3, SSD1306_WHITE);
 

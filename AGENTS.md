@@ -1,5 +1,5 @@
 Target board: (any) Generic ESP32S3 dev board
-Pins: Zout = 5, Yout = 6, Xout = 7, neopixel: 48
+Pins: Zout = 5, Yout = 6, Xout = 7, neopixel: 48, SDA: 3, SCL: 4
 
 Available tools: Arduino cli, tio, basic c/c++ compilations tools
 
