@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <atomic>
 #include "MAX30105.h"
 #include "spo2_algorithm.h"
 #include "config.h"
@@ -32,6 +33,11 @@ inline MAX30105 g_pulseSensor;
 inline TaskHandle_t g_pulseOxTaskHandle = NULL;
 
 namespace {
+  // Collect samples for 10 seconds before capturing the resting heart-rate baseline.
+  constexpr uint32_t PULSE_OX_CALIBRATION_MS = 10000;
+  uint32_t s_fingerDetectedAtMs = 0;
+  // A value of 0 means no baseline has been saved for this session.
+  std::atomic<int> s_baselineBpm{0};
   uint32_t s_irBuffer[PULSE_OX_WINDOW];
   uint32_t s_redBuffer[PULSE_OX_WINDOW];
   int s_pulseOxSamples = 0;
@@ -43,6 +49,8 @@ namespace {
 struct SheetsPayload {
   int bpm;
   int spo2;
+  uint32_t reps;
+  int baselineBpm;
 };
 
 inline void sheetsTask(void* param) {
@@ -54,7 +62,10 @@ inline void sheetsTask(void* param) {
     if (http.begin(GOOGLE_SHEETS_URL)) {
       http.addHeader("Content-Type", "application/json");
 
-      String jsonPayload = "{\"bpm\":" + String(p->bpm) + ",\"spo2\":" + String(p->spo2) + "}";
+      String jsonPayload = "{\"bpm\":" + String(p->bpm) +
+                     ",\"spo2\":" + String(p->spo2) +
+                     ",\"reps\":" + String(p->reps) +
+                     ",\"baselineBpm\":" + String(p->baselineBpm) + "}";
       int httpResponseCode = http.POST(jsonPayload);
       if (httpResponseCode > 0) {
         Serial.printf("[SHEETS] Vitals uploaded (BPM: %d, SpO2: %d%%). HTTP: %d\r\n", p->bpm, p->spo2, httpResponseCode);
@@ -85,7 +96,8 @@ inline void triggerGoogleSheetsPost(int bpm, int spo2) {
 
   s_sheetsTaskRunning = true;
   s_lastSheetsPostMs = now;
-  SheetsPayload* p = new SheetsPayload{bpm, spo2};
+  // Copy the live readings, rep count, and saved baseline for the upload task.
+ SheetsPayload* p = new SheetsPayload{bpm, spo2, g_repCount.load(), s_baselineBpm.load()};
   BaseType_t res = xTaskCreatePinnedToCore(sheetsTask, "sheets_task", 12288, p, 1, NULL, 0);
   if (res != pdPASS) {
     delete p;
@@ -94,13 +106,21 @@ inline void triggerGoogleSheetsPost(int bpm, int spo2) {
   }
 }
 
-// Reset readings
+// Clear live readings and samples while keeping the session baseline.
 inline void resetPulseOxReadings() {
   s_pulseOxSamples = 0;
   g_pulseOx.haveBpm = false;
   g_pulseOx.haveSpo2 = false;
   g_pulseOx.latestBpmValid = false;
   g_pulseOx.latestSpo2Valid = false;
+}
+
+inline uint32_t pulseOxCalibrationRemainingMs() {
+  if (s_baselineBpm.load() > 0 || !g_pulseOx.fingerPresent) return 0;
+
+  uint32_t elapsed = millis() - s_fingerDetectedAtMs;
+  if (elapsed >= PULSE_OX_CALIBRATION_MS) return 0;
+  return PULSE_OX_CALIBRATION_MS - elapsed;
 }
 
 // Calculate readings
@@ -153,8 +173,16 @@ inline void calculatePulseOxReadings() {
     g_pulseOx.haveSpo2 = true;
     g_pulseOx.lastSpo2Time = now;
   }
+  // Save the first valid smoothed BPM after the countdown as the session baseline.
+  if (s_baselineBpm.load() == 0 &&
+    g_pulseOx.fingerPresent &&
+    pulseOxCalibrationRemainingMs() == 0 &&
+    g_pulseOx.latestBpmValid) {
+  s_baselineBpm.store((int)(g_pulseOx.bpm + 0.5f));
+}
 
-  if (g_pulseOx.latestBpmValid && g_pulseOx.latestSpo2Valid) {
+  if (pulseOxCalibrationRemainingMs() == 0 &&
+    g_pulseOx.latestBpmValid && g_pulseOx.latestSpo2Valid) {
     triggerGoogleSheetsPost((int)(g_pulseOx.bpm + 0.5f), (int)(g_pulseOx.spo2 + 0.5f));
   }
 
@@ -236,8 +264,9 @@ inline void pulseOxTask(void* pvParameters) {
       }
 
       if (!g_pulseOx.fingerPresent) {
-        resetPulseOxReadings();
-        g_pulseOx.fingerPresent = true;
+       resetPulseOxReadings();
+       s_fingerDetectedAtMs = now;
+       g_pulseOx.fingerPresent = true;
       }
 
       g_pulseOx.lastFingerTime = now;
@@ -279,6 +308,7 @@ inline void updatePulseOx() {
 
 // Vitals accessors
 inline int getDisplayBpm() {
+  if (pulseOxCalibrationRemainingMs() > 0) return 0;
   uint32_t now = millis();
   if (g_pulseOx.haveBpm && (now - g_pulseOx.lastBpmTime < PULSE_OX_KEEP_LAST_MS)) {
     return (int)(g_pulseOx.bpm + 0.5f);
@@ -287,6 +317,7 @@ inline int getDisplayBpm() {
 }
 
 inline int getDisplaySpo2() {
+  if (pulseOxCalibrationRemainingMs() > 0) return 0;
   uint32_t now = millis();
   if (g_pulseOx.haveSpo2 && (now - g_pulseOx.lastSpo2Time < PULSE_OX_KEEP_LAST_MS)) {
     return (int)(g_pulseOx.spo2 + 0.5f);

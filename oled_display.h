@@ -194,6 +194,7 @@ inline void updateOledScreen() {
   if (!g_oledConnected) {
     if (now - s_lastOledProbe >= 4000) {
       s_lastOledProbe = now;
+      
       initOled();
     }
     return;
@@ -215,7 +216,24 @@ inline void updateOledScreen() {
   g_oled.clearDisplay();
   g_oled.setTextColor(SSD1306_WHITE);
 
-  // Rep counter & state
+  // Show the countdown while the pulse oximeter collects baseline samples.
+    uint32_t remainingMs = pulseOxCalibrationRemainingMs();
+  if (remainingMs > 0) {
+    g_oled.clearDisplay();
+    g_oled.setTextColor(SSD1306_WHITE);
+    g_oled.setTextSize(1);
+
+    g_oled.setCursor(20, 12);
+    g_oled.println(F("CALIBRATING..."));
+
+    g_oled.setCursor(20, 32);
+    g_oled.print((remainingMs + 999) / 1000);
+    g_oled.println(F(" s remaining"));
+
+    g_oled.display();
+    // Skip the regular display while the countdown is visible.
+    return;
+  }
   g_oled.setTextSize(1);
   g_oled.setCursor(0, 0);
   g_oled.printf("REPS: %u", (unsigned int)g_repCount);
