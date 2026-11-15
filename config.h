@@ -52,6 +52,17 @@ enum FsmState {
   STATE_COMPLETED
 };
 
+// Exercises
+enum ExerciseType {
+  EXERCISE_CURL,   // tracked by forearm angle
+  EXERCISE_PRESS   // shoulder press, tracked by vertical movement
+};
+
+inline const char* exerciseName(ExerciseType ex) {
+  return (ex == EXERCISE_PRESS) ? "Shoulder Press" : "Bicep Curl";
+}
+
+extern ExerciseType g_exercise;
 extern volatile FsmState g_fsmState;
 extern std::atomic<uint32_t> g_repCount;
 extern bool isCalibrated;
@@ -72,6 +83,10 @@ struct KinematicsState {
   float angularVelocity;
   float jerk;
   float liveQuality;
+  float upAccel;     // vertical acceleration with gravity removed, g (+ = up)
+  float upVelocity;  // vertical speed, m/s (+ = up)
+  float heightCm;    // height gained since the rep started, cm
+  float sideAccel;   // acceleration off the vertical, g (sway or tilt)
 };
 
 struct PulseOxState {
@@ -98,6 +113,8 @@ struct RepMetrics {
   float concentricDurationSec;
   float eccentricDurationSec;
   float peakAngleDeg;
+  float peakHeightCm;
+  ExerciseType exercise;
   float qualitySum;
   uint32_t qualitySampleCount;
   float finalQualityFactor;
