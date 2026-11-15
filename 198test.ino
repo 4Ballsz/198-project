@@ -4,6 +4,7 @@
 #include <WebSocketsServer.h>
 #include <esp32-hal-rgb-led.h>
 #include <math.h>
+#include <atomic>
 
 #include "config.h"
 #include "pulse_ox.h"
@@ -30,7 +31,7 @@ constexpr size_t MAX_REP_HISTORY = 40;
 RepMetrics g_repHistory[MAX_REP_HISTORY];
 size_t g_repHistoryCount = 0;
 volatile FsmState g_fsmState = STATE_IDLE;
-uint32_t g_repCount = 0;
+std::atomic<uint32_t> g_repCount{0};
 
 uint32_t g_lastSampleTimeMs = 0;
 uint32_t g_completionFlashUntilMs = 0;
@@ -461,7 +462,7 @@ void processPressFSM(uint32_t now) {
 // Rep scoring (shared by all exercises)
 void completeRep(uint32_t now) {
   g_repCount++;
-  g_currentRep.repNumber = g_repCount;
+  g_currentRep.repNumber = g_repCount.load();
 
   float avgLiveQ = (g_currentRep.qualitySampleCount > 0)
                      ? (g_currentRep.qualitySum / g_currentRep.qualitySampleCount)
@@ -612,7 +613,7 @@ void printTelemetry() {
                 motionStr,
                 g_kinematics.jerk,
                 g_kinematics.liveQuality,
-                g_repCount,
+                g_repCount.load(),
                 stateStr,
                 pulseStr,
                 coreTemp);
@@ -740,7 +741,7 @@ void handleApiData() {
   json += "\"vel\":" + String(g_kinematics.angularVelocity, 1) + ",";
   json += "\"jerk\":" + String(g_kinematics.jerk, 1) + ",";
   json += "\"q\":" + String(g_kinematics.liveQuality, 1) + ",";
-  json += "\"reps\":" + String(g_repCount) + ",";
+  json += "\"reps\":" + String(g_repCount.load()) + ",";
   json += "\"state\":\"" + String(stateStr) + "\",";
   json += "\"bpm\":" + String(getDisplayBpm()) + ",";
   json += "\"spo2\":" + String(getDisplaySpo2()) + ",";
@@ -794,7 +795,7 @@ void broadcastWsData(bool forceHistory = false) {
   json += "\"vel\":" + String(g_kinematics.angularVelocity, 1) + ",";
   json += "\"jerk\":" + String(g_kinematics.jerk, 1) + ",";
   json += "\"q\":" + String(g_kinematics.liveQuality, 1) + ",";
-  json += "\"reps\":" + String(g_repCount) + ",";
+  json += "\"reps\":" + String(g_repCount.load()) + ",";
   json += "\"state\":\"" + String(stateStr) + "\",";
   json += "\"bpm\":" + String(getDisplayBpm()) + ",";
   json += "\"spo2\":" + String(getDisplaySpo2()) + ",";
@@ -806,9 +807,9 @@ void broadcastWsData(bool forceHistory = false) {
   json += "\"ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("Connecting...")) + "\",";
   json += "\"sheetsLogging\":" + String(ENABLE_GOOGLE_SHEETS_LOGGING ? "true" : "false");
 
-  bool includeHistory = forceHistory || (g_repCount != s_lastWsRepCount) || (g_repHistoryCount != s_lastWsRepHistoryCount);
+  bool includeHistory = forceHistory || (g_repCount.load() != s_lastWsRepCount) || (g_repHistoryCount != s_lastWsRepHistoryCount);
   if (includeHistory) {
-    s_lastWsRepCount = g_repCount;
+    s_lastWsRepCount = g_repCount.load();
     s_lastWsRepHistoryCount = g_repHistoryCount;
     json += ",\"history\":[";
     for (size_t i = 0; i < g_repHistoryCount; i++) {

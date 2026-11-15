@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 
 // Pinout
 constexpr int PIN_ZOUT = 5;
@@ -27,10 +28,10 @@ constexpr int PULSE_OX_STEP = 25;
 // Google Sheets logging
 inline bool ENABLE_GOOGLE_SHEETS_LOGGING = true;
 constexpr uint32_t GOOGLE_SHEETS_INTERVAL_MS = 4000;
-inline const char* GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyFkQOzMYgYU8nC_iBMDek3Dhe4VChAXHswgytS0Cue5-QH8Kif0gpI0xFMC4RfNqIUGQ/exec";
+inline const char* GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbz9-rOHnXI12fe7s2rbl4aASGnCsq5rFBiSPKpXRylRA3bS0BUmj3QGihcWTZO9wntr_Q/exec";
 
 // Wi-Fi credentials
-inline const char* WIFI_SSID = "Iphone Ivanna";
+inline const char* WIFI_SSID = "iPhone Ivanna";
 inline const char* WIFI_PASS = "5261769199";
 
 // SoftAP fallback
@@ -63,7 +64,7 @@ inline const char* exerciseName(ExerciseType ex) {
 
 extern ExerciseType g_exercise;
 extern volatile FsmState g_fsmState;
-extern uint32_t g_repCount;
+extern std::atomic<uint32_t> g_repCount;
 extern bool isCalibrated;
 struct KinematicsState;
 extern KinematicsState g_kinematics;
