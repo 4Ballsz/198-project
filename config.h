@@ -31,8 +31,8 @@ constexpr uint32_t GOOGLE_SHEETS_INTERVAL_MS = 4000;
 inline const char* GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbz9-rOHnXI12fe7s2rbl4aASGnCsq5rFBiSPKpXRylRA3bS0BUmj3QGihcWTZO9wntr_Q/exec";
 
 // Wi-Fi credentials
-inline const char* WIFI_SSID = "iPhone Ivanna";
-inline const char* WIFI_PASS = "5261769199";
+inline const char* WIFI_SSID = "Pixel_7267";
+inline const char* WIFI_PASS = "thyshalldata";
 
 // SoftAP fallback
 inline const char* AP_SSID = "esp32ap";
@@ -124,3 +124,51 @@ struct RepMetrics {
   int avgBpm;
   int avgSpo2;
 };
+
+constexpr size_t MAX_REP_HISTORY = 40;
+extern RepMetrics g_currentRep;
+extern RepMetrics g_repHistory[MAX_REP_HISTORY];
+extern size_t g_repHistoryCount;
+
+// Sets tracking
+struct SetRecord {
+  uint32_t setNumber;
+  ExerciseType exercise;
+  uint32_t repCount;
+  float avgQuality;
+  uint32_t durationSec;
+  int avgBpm;
+  int avgSpo2;
+};
+
+constexpr size_t MAX_SET_HISTORY = 20;
+extern SetRecord g_setHistory[MAX_SET_HISTORY];
+extern size_t g_setHistoryCount;
+extern uint32_t g_currentSetNumber;
+extern uint32_t g_currentSetStartTimeMs;
+
+// Active BLE Beacon State
+struct ActiveBeaconState {
+  bool valid;
+  uint8_t exerciseId;
+  char beaconName[16];
+  char exerciseName[24];
+  int rssi;
+  uint8_t r, g, b;
+  char hexColor[10];
+  uint32_t lastSeenMs;
+  uint32_t lastChangeTimeMs;
+  char macAddress[18];
+};
+
+extern ActiveBeaconState g_activeBeacon;
+extern bool g_beaconValid;
+extern uint32_t g_beaconChangeScreenUntilMs;
+
+inline bool isBeaconValid() {
+  return g_beaconValid;
+}
+
+inline bool isBeaconChangeScreenActive() {
+  return millis() < g_beaconChangeScreenUntilMs;
+}

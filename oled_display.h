@@ -187,6 +187,64 @@ int getDisplaySpo2();
 float getCoreTemp();
 const char* getPulseOxStatusStr();
 
+// Beacon notification screens
+inline void showOledBeaconChanged() {
+  if (!g_oledConnected) return;
+  g_oled.clearDisplay();
+  g_oled.setTextColor(SSD1306_WHITE);
+
+  g_oled.fillRect(0, 0, 128, 14, SSD1306_WHITE);
+  g_oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  g_oled.setTextSize(1);
+  g_oled.setCursor(18, 3);
+  g_oled.print(F("BEACON DETECTED"));
+
+  g_oled.setTextColor(SSD1306_WHITE);
+  const char* exName = (g_exercise == EXERCISE_PRESS) ? "PRESS" : "CURL";
+  g_oled.setTextSize(2);
+  int16_t x = (128 - (int16_t)(strlen(exName) * 12)) / 2;
+  if (x < 0) x = 0;
+  g_oled.setCursor(x, 19);
+  g_oled.print(exName);
+
+  g_oled.drawFastHLine(6, 37, 116, SSD1306_WHITE);
+
+  g_oled.setTextSize(1);
+  g_oled.setCursor(8, 41);
+  g_oled.printf("Starting Set #%u", (unsigned int)g_currentSetNumber);
+
+  g_oled.setCursor(8, 52);
+  g_oled.printf("Reps: 0  (%ddBm)", g_activeBeacon.rssi);
+
+  g_oled.display();
+}
+
+inline void showOledNoBeacon() {
+  if (!g_oledConnected) return;
+  g_oled.clearDisplay();
+  g_oled.setTextColor(SSD1306_WHITE);
+
+  g_oled.fillRect(0, 0, 128, 14, SSD1306_WHITE);
+  g_oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  g_oled.setTextSize(1);
+  g_oled.setCursor(12, 3);
+  g_oled.print(F("NO BEACON DETECTED"));
+
+  g_oled.setTextColor(SSD1306_WHITE);
+  g_oled.setCursor(6, 19);
+  g_oled.print(F("Station out of range"));
+
+  g_oled.drawFastHLine(8, 32, 112, SSD1306_WHITE);
+
+  g_oled.setCursor(16, 37);
+  g_oled.print(F("Tracking: PAUSED"));
+
+  g_oled.setCursor(6, 51);
+  g_oled.print(F("Approach a beacon..."));
+
+  g_oled.display();
+}
+
 // Screen update
 inline void updateOledScreen() {
   uint32_t now = millis();
@@ -213,11 +271,23 @@ inline void updateOledScreen() {
     return;
   }
 
+  // Show beacon transition screen if closest beacon recently changed
+  if (isBeaconChangeScreenActive()) {
+    showOledBeaconChanged();
+    return;
+  }
+
+  // If no good beacon is detected, pause and display message on OLED
+  if (!isBeaconValid()) {
+    showOledNoBeacon();
+    return;
+  }
+
   g_oled.clearDisplay();
   g_oled.setTextColor(SSD1306_WHITE);
 
   // Show the countdown while the pulse oximeter collects baseline samples.
-    uint32_t remainingMs = pulseOxCalibrationRemainingMs();
+  uint32_t remainingMs = pulseOxCalibrationRemainingMs();
   if (remainingMs > 0) {
     g_oled.clearDisplay();
     g_oled.setTextColor(SSD1306_WHITE);
@@ -231,15 +301,15 @@ inline void updateOledScreen() {
     g_oled.println(F(" s remaining"));
 
     g_oled.display();
-    // Skip the regular display while the countdown is visible.
     return;
   }
+
   g_oled.setTextSize(1);
   g_oled.setCursor(0, 0);
-  g_oled.printf("REPS: %u", (unsigned int)g_repCount);
+  g_oled.printf("S#%u R:%u", (unsigned int)g_currentSetNumber, (unsigned int)g_repCount.load());
 
   bool isPress = (g_exercise == EXERCISE_PRESS);
-  g_oled.setCursor(62, 0);
+  g_oled.setCursor(56, 0);
   g_oled.print(isPress ? "PRESS" : "CURL");
 
   const char* stateStr = "IDLE";
@@ -283,9 +353,11 @@ inline void updateOledScreen() {
 
   g_oled.drawFastHLine(0, 36, 128, SSD1306_WHITE);
 
-  // Diagnostics
+  // Diagnostics & signal
   g_oled.setCursor(0, 39);
-  g_oled.printf("Temp: %.1fC", getCoreTemp());
+  g_oled.printf("T:%.0fC", getCoreTemp());
+  g_oled.setCursor(40, 39);
+  g_oled.printf("%ddB", g_activeBeacon.rssi);
 
   if (g_lastCompletedRep.repNumber > 0) {
     g_oled.setCursor(76, 39);

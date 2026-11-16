@@ -131,6 +131,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <div class="stats-bar">
     <div class="stat-item"><span class="stat-label">Feed:</span> <span class="stat-val" id="wsStatus" style="color: #ca8a04;">○ Connecting...</span></div>
+    <div class="stat-item"><span class="stat-label">Beacon:</span> <span class="stat-val" id="valBeacon" style="color: #ca8a04;">Scanning...</span></div>
+    <div class="stat-item"><span class="stat-label">Set:</span> <span class="stat-val" id="valSet">#1</span></div>
     <div class="stat-item"><span class="stat-label">Reps:</span> <span class="stat-val" id="valReps">0</span></div>
     <div class="stat-item"><span class="stat-label">Exercise:</span> <span class="stat-val" id="valExercise">Bicep Curl</span></div>
     <div class="stat-item"><span class="stat-label">State:</span> <span class="stat-val" id="valState">IDLE</span></div>
@@ -158,6 +160,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button onclick="sendCommand('calibrate')">Calibrate</button>
     <button onclick="sendCommand('reset')">Reset</button>
     <button onclick="sendCommand('exercise_toggle')">Switch Exercise</button>
+  </div>
+
+  <div class="history-box" style="margin-bottom: 12px;">
+    <div class="history-title">Completed Sets</div>
+    <div class="history-scroll" style="max-height: 140px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Set #</th>
+            <th>Exercise</th>
+            <th>Reps</th>
+            <th>Avg Quality</th>
+            <th>Duration</th>
+            <th>Avg HR</th>
+          </tr>
+        </thead>
+        <tbody id="setTableBody">
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <div class="history-box">
@@ -277,7 +299,20 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     function applyData(d) {
       if (d.reps !== undefined) document.getElementById('valReps').innerText = d.reps;
+      if (d.set !== undefined) document.getElementById('valSet').innerText = '#' + d.set;
       if (d.state !== undefined) document.getElementById('valState').innerText = d.state;
+
+      if (d.beacon !== undefined) {
+        const bEl = document.getElementById('valBeacon');
+        if (d.beacon.valid) {
+          const col = d.beacon.color || '#00b4ff';
+          bEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + col + ';margin-right:4px;"></span>' + d.beacon.name + ' (' + d.beacon.rssi + ' dBm)';
+          bEl.style.color = '#111827';
+        } else {
+          bEl.innerHTML = '<span style="color:#ef4444;">○ No Beacon (Paused)</span>';
+        }
+      }
+
       const isPress = d.exercise === 'press';
       if (d.exercise !== undefined) {
         document.getElementById('valExercise').innerText = isPress ? 'Shoulder Press' : 'Bicep Curl';
@@ -328,6 +363,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         spo2History.shift();
         spo2History.push(d.spo2 || 0);
         drawChart();
+      }
+
+      // Update Completed Sets list when present in payload
+      if (d.sets) {
+        const setTbody = document.getElementById('setTableBody');
+        if (setTbody) {
+          setTbody.innerHTML = '';
+          d.sets.forEach(s => {
+            const tr = document.createElement('tr');
+            const hrStr = (s.bpm && s.bpm > 0) ? `${s.bpm} bpm` : '--';
+            const exName = (s.ex === 'press') ? 'Shoulder Press' : 'Bicep Curl';
+            tr.innerHTML = `
+              <td><b>#${s.set}</b></td>
+              <td>${exName}</td>
+              <td><b>${s.reps}</b></td>
+              <td>${s.q.toFixed(1)}%</td>
+              <td>${s.dur}s</td>
+              <td>${hrStr}</td>
+            `;
+            setTbody.appendChild(tr);
+          });
+        }
       }
 
       // Update Rep History List when present in payload
@@ -405,6 +462,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if (cmd === 'reset') {
         renderedRepCount = 0;
         document.getElementById('repTableBody').innerHTML = '';
+        const setTable = document.getElementById('setTableBody');
+        if (setTable) setTable.innerHTML = '';
       }
     }
 

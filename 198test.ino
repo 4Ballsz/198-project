@@ -10,6 +10,29 @@
 #include "pulse_ox.h"
 #include "webpage.h"
 #include "perf_metrics.h"
+#include "beacon_detector.h"
+
+// Set tracking
+SetRecord g_setHistory[MAX_SET_HISTORY];
+size_t g_setHistoryCount = 0;
+uint32_t g_currentSetNumber = 1;
+uint32_t g_currentSetStartTimeMs = 0;
+
+// Active BLE Beacon State
+ActiveBeaconState g_activeBeacon = {
+  .valid = false,
+  .exerciseId = 0,
+  .beaconName = "None",
+  .exerciseName = "None",
+  .rssi = -999,
+  .r = 0, .g = 0, .b = 0,
+  .hexColor = "#000000",
+  .lastSeenMs = 0,
+  .lastChangeTimeMs = 0,
+  .macAddress = ""
+};
+bool g_beaconValid = false;
+uint32_t g_beaconChangeScreenUntilMs = 0;
 
 // vars
 float restX_g = 0.0f;
@@ -27,7 +50,6 @@ AccelerometerSample g_sensor = {0};
 KinematicsState g_kinematics = {0};
 RepMetrics g_currentRep = {0};
 RepMetrics g_lastCompletedRep = {0};
-constexpr size_t MAX_REP_HISTORY = 40;
 RepMetrics g_repHistory[MAX_REP_HISTORY];
 size_t g_repHistoryCount = 0;
 volatile FsmState g_fsmState = STATE_IDLE;
@@ -254,15 +276,34 @@ void updateNeoPixelFeedback() {
     return;
   }
 
+  // If no good beacon detected, show amber breathing pulse to indicate paused/waiting
+  if (!isBeaconValid()) {
+    static uint8_t nbPulse = 4;
+    static bool nbDir = true;
+    if (nbDir) {
+      if (++nbPulse >= 22) nbDir = false;
+    } else {
+      if (--nbPulse <= 4) nbDir = true;
+    }
+    setNeoPixelColor(nbPulse, nbPulse / 3, 0);
+    return;
+  }
+
   if (g_fsmState == STATE_IDLE) {
     static uint8_t pulse = 4;
     static bool dir = true;
     if (dir) {
-      if (++pulse >= 20) dir = false;
+      if (++pulse >= 22) dir = false;
     } else {
       if (--pulse <= 4) dir = true;
     }
-    setNeoPixelColor(0, 0, pulse);
+    // Breathe active beacon's associated color
+    float factor = (float)pulse / 255.0f;
+    uint8_t pr = (uint8_t)(g_activeBeacon.r * factor);
+    uint8_t pg = (uint8_t)(g_activeBeacon.g * factor);
+    uint8_t pb = (uint8_t)(g_activeBeacon.b * factor);
+    if (pr == 0 && pg == 0 && pb == 0) pb = pulse;
+    setNeoPixelColor(pr, pg, pb);
     return;
   }
 
@@ -508,6 +549,12 @@ void completeRep(uint32_t now) {
 
 // Rep FSM
 void processRepFSM() {
+  // If no good bluetooth beacon is detected, do not track any activity
+  if (!isBeaconValid()) {
+    g_fsmState = STATE_IDLE;
+    return;
+  }
+
   uint32_t now = millis();
 
   if (g_fsmState == STATE_COMPLETED) {
@@ -609,12 +656,21 @@ void printTelemetry() {
              g_kinematics.angleDeg, g_kinematics.angularVelocity);
   }
 
-  Serial.printf("%s | Jerk: %4.1fg/s | Q: %5.1f%% | Reps: %2u | [%s] | %s | Temp: %4.1f°C\r\n",
+  char beaconStr[32];
+  if (g_beaconValid) {
+    snprintf(beaconStr, sizeof(beaconStr), "BLE:%s(%ddB)", g_activeBeacon.beaconName, g_activeBeacon.rssi);
+  } else {
+    snprintf(beaconStr, sizeof(beaconStr), "BLE:[NO BEACON]");
+  }
+
+  Serial.printf("%s | Jerk: %4.1fg/s | Q: %5.1f%% | S#%u Reps: %2u | [%s] | %s | %s | Temp: %4.1f°C\r\n",
                 motionStr,
                 g_kinematics.jerk,
                 g_kinematics.liveQuality,
+                (unsigned int)g_currentSetNumber,
                 g_repCount.load(),
                 stateStr,
+                beaconStr,
                 pulseStr,
                 coreTemp);
 }
@@ -711,7 +767,8 @@ void printHelp() {
   Serial.println("  's' or ' ' -> Pause / Resume output");
   Serial.println("  'p'        -> Toggle Serial Plotter mode");
   Serial.println("  'c'        -> Calibrate arm hang position");
-  Serial.println("  'r'        -> Reset rep count to 0");
+  Serial.println("  'r'        -> Reset rep count and sets");
+  Serial.println("  'b'        -> BLE Workout Beacon status");
   Serial.println("  'e'        -> Switch exercise (curl / shoulder press)");
   Serial.println("  'o'        -> Pulse Oximeter status");
   Serial.println("  'g'        -> Toggle Google Sheets logging");
@@ -729,12 +786,20 @@ void handleRoot() {
 
 void handleApiData() {
   const char* stateStr = "IDLE";
-  if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFTING";
+  if (!isBeaconValid()) stateStr = "PAUSED";
+  else if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFTING";
   else if (g_fsmState == STATE_PEAK)  stateStr = "PEAK";
   else if (g_fsmState == STATE_ECCENTRIC) stateStr = "LOWERING";
 
   String json = "{";
   json += "\"exercise\":\"" + String(g_exercise == EXERCISE_PRESS ? "press" : "curl") + "\",";
+  json += "\"beacon\":{";
+  json += "\"valid\":" + String(g_beaconValid ? "true" : "false") + ",";
+  json += "\"name\":\"" + String(g_activeBeacon.beaconName) + "\",";
+  json += "\"exerciseName\":\"" + String(g_activeBeacon.exerciseName) + "\",";
+  json += "\"rssi\":" + String(g_activeBeacon.rssi) + ",";
+  json += "\"color\":\"" + String(g_activeBeacon.hexColor) + "\"},";
+  json += "\"set\":" + String(g_currentSetNumber) + ",";
   json += "\"angle\":" + String(g_kinematics.angleDeg, 1) + ",";
   json += "\"height\":" + String(g_kinematics.heightCm, 1) + ",";
   json += "\"upVel\":" + String(g_kinematics.upVelocity, 2) + ",";
@@ -752,6 +817,20 @@ void handleApiData() {
   json += "\"wifiConnected\":" + String((WiFi.status() == WL_CONNECTED) ? "true" : "false") + ",";
   json += "\"ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("Connecting...")) + "\",";
   json += "\"sheetsLogging\":" + String(ENABLE_GOOGLE_SHEETS_LOGGING ? "true" : "false") + ",";
+
+  json += "\"sets\":[";
+  for (size_t i = 0; i < g_setHistoryCount; i++) {
+    if (i > 0) json += ",";
+    bool isPress = (g_setHistory[i].exercise == EXERCISE_PRESS);
+    json += "{\"set\":" + String(g_setHistory[i].setNumber) + ",";
+    json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+    json += "\"reps\":" + String(g_setHistory[i].repCount) + ",";
+    json += "\"q\":" + String(g_setHistory[i].avgQuality, 1) + ",";
+    json += "\"dur\":" + String(g_setHistory[i].durationSec) + ",";
+    json += "\"bpm\":" + String(g_setHistory[i].avgBpm) + "}";
+  }
+  json += "],";
+
   json += "\"history\":[";
 
   for (size_t i = 0; i < g_repHistoryCount; i++) {
@@ -779,16 +858,24 @@ void handleApiData() {
 }
 
 // ws streaming
-void broadcastWsData(bool forceHistory = false) {
+void broadcastWsData(bool forceHistory) {
   if (webSocket.connectedClients() == 0) return;
 
   const char* stateStr = "IDLE";
-  if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFTING";
+  if (!isBeaconValid()) stateStr = "PAUSED";
+  else if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFTING";
   else if (g_fsmState == STATE_PEAK)  stateStr = "PEAK";
   else if (g_fsmState == STATE_ECCENTRIC) stateStr = "LOWERING";
 
   String json = "{";
   json += "\"exercise\":\"" + String(g_exercise == EXERCISE_PRESS ? "press" : "curl") + "\",";
+  json += "\"beacon\":{";
+  json += "\"valid\":" + String(g_beaconValid ? "true" : "false") + ",";
+  json += "\"name\":\"" + String(g_activeBeacon.beaconName) + "\",";
+  json += "\"exerciseName\":\"" + String(g_activeBeacon.exerciseName) + "\",";
+  json += "\"rssi\":" + String(g_activeBeacon.rssi) + ",";
+  json += "\"color\":\"" + String(g_activeBeacon.hexColor) + "\"},";
+  json += "\"set\":" + String(g_currentSetNumber) + ",";
   json += "\"angle\":" + String(g_kinematics.angleDeg, 1) + ",";
   json += "\"height\":" + String(g_kinematics.heightCm, 1) + ",";
   json += "\"upVel\":" + String(g_kinematics.upVelocity, 2) + ",";
@@ -811,7 +898,18 @@ void broadcastWsData(bool forceHistory = false) {
   if (includeHistory) {
     s_lastWsRepCount = g_repCount.load();
     s_lastWsRepHistoryCount = g_repHistoryCount;
-    json += ",\"history\":[";
+    json += ",\"sets\":[";
+    for (size_t i = 0; i < g_setHistoryCount; i++) {
+      if (i > 0) json += ",";
+      bool isPress = (g_setHistory[i].exercise == EXERCISE_PRESS);
+      json += "{\"set\":" + String(g_setHistory[i].setNumber) + ",";
+      json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+      json += "\"reps\":" + String(g_setHistory[i].repCount) + ",";
+      json += "\"q\":" + String(g_setHistory[i].avgQuality, 1) + ",";
+      json += "\"dur\":" + String(g_setHistory[i].durationSec) + ",";
+      json += "\"bpm\":" + String(g_setHistory[i].avgBpm) + "}";
+    }
+    json += "],\"history\":[";
     for (size_t i = 0; i < g_repHistoryCount; i++) {
       if (i > 0) json += ",";
       String diag = "";
@@ -876,10 +974,13 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       } else if (cmd == "reset") {
         g_repCount = 0;
         g_repHistoryCount = 0;
+        g_setHistoryCount = 0;
+        g_currentSetNumber = 1;
+        g_currentSetStartTimeMs = millis();
         g_lastCompletedRep = {0};
         s_lastWsRepCount = 0;
         s_lastWsRepHistoryCount = 0;
-        Serial.println("\r\n[RESET] Rep count reset to 0.");
+        Serial.println("\r\n[RESET] Rep count and sets reset to 0.");
         broadcastWsData(true);
       } else if (cmd == "sheets_toggle") {
         ENABLE_GOOGLE_SHEETS_LOGGING = !ENABLE_GOOGLE_SHEETS_LOGGING;
@@ -903,10 +1004,13 @@ void handleApiCommand() {
     } else if (action == "reset") {
       g_repCount = 0;
       g_repHistoryCount = 0;
+      g_setHistoryCount = 0;
+      g_currentSetNumber = 1;
+      g_currentSetStartTimeMs = millis();
       g_lastCompletedRep = {0};
       s_lastWsRepCount = 0;
       s_lastWsRepHistoryCount = 0;
-      Serial.println("\r\n[RESET] Rep count reset to 0.");
+      Serial.println("\r\n[RESET] Rep count and sets reset to 0.");
       broadcastWsData(true);
     } else if (action == "sheets_toggle") {
       ENABLE_GOOGLE_SHEETS_LOGGING = !ENABLE_GOOGLE_SHEETS_LOGGING;
@@ -994,6 +1098,11 @@ void setup() {
   PerfDebug::initPerfHooks();
   delay(100);
 
+  showOledBootProgress("BLE Scan");
+  initBeaconDetector();
+  g_currentSetStartTimeMs = millis();
+  delay(100);
+
   showOledBootProgress("Calibrate");
   delay(300);
   calibrateRestPosition();
@@ -1032,11 +1141,18 @@ void loop() {
       case 'R':
         g_repCount = 0;
         g_repHistoryCount = 0;
+        g_setHistoryCount = 0;
+        g_currentSetNumber = 1;
+        g_currentSetStartTimeMs = millis();
         g_lastCompletedRep = {0};
         s_lastWsRepCount = 0;
         s_lastWsRepHistoryCount = 0;
-        Serial.println("\r\n[RESET] Rep count reset to 0.");
+        Serial.println("\r\n[RESET] Rep count and sets reset to 0.");
         broadcastWsData(true);
+        break;
+      case 'b':
+      case 'B':
+        logBeaconStatus();
         break;
       case 'o':
       case 'O':
@@ -1113,6 +1229,13 @@ void loop() {
     updateNeoPixelFeedback();
 
     PerfDebug::recordKinematicsTiming(dt_sec * 1000.0f, micros() - sampleStartUs);
+  }
+
+  // BLE Beacon evaluation loop (10 Hz)
+  static uint32_t s_lastBeaconCheckMs = 0;
+  if (now - s_lastBeaconCheckMs >= 100) {
+    s_lastBeaconCheckMs = now;
+    updateBeaconDetector();
   }
 
   // Telemetry loop

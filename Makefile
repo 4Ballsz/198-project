@@ -4,7 +4,7 @@ TIO           ?= tio
 
 # Board configuration
 FQBN          ?= esp32:esp32:esp32s3
-BOARD_OPTIONS ?= CDCOnBoot=cdc
+BOARD_OPTIONS ?= CDCOnBoot=cdc,PartitionScheme=huge_app
 
 # Serial port detection (prefers first connected ACM/USB serial device)
 DETECTED_PORT := $(shell $(ARDUINO_CLI) board list 2>/dev/null | grep -E '^/dev/tty(ACM|USB)' | head -n1 | awk '{print $$1}')
@@ -14,6 +14,27 @@ BAUD          ?= 115200
 # Directories and sketch
 SKETCH_DIR    ?= $(CURDIR)
 BUILD_DIR     ?= $(SKETCH_DIR)/build
+BEACON_DIR    ?= $(SKETCH_DIR)/beacon_emitter
+BEACON_BUILD  ?= $(BEACON_DIR)/build
+
+# Beacon selection for beacon emitter (curl, press, squat or 0, 1, 2)
+BEACON        ?= curl
+ifeq ($(BEACON),curl)
+  BEACON_IDX := 0
+else ifeq ($(BEACON),0)
+  BEACON_IDX := 0
+else ifeq ($(BEACON),press)
+  BEACON_IDX := 1
+else ifeq ($(BEACON),1)
+  BEACON_IDX := 1
+else ifeq ($(BEACON),squat)
+  BEACON_IDX := 2
+else ifeq ($(BEACON),2)
+  BEACON_IDX := 2
+else
+  BEACON_IDX := 0
+endif
+BEACON_FLAGS  := --build-property 'build.extra_flags="-DFORCE_BEACON_INDEX=$(BEACON_IDX)"'
 
 # Files to temporarily hide during compilation (per AGENTS.md)
 IGNORE_FILES  ?= Pulse_Oximeter_Plus_Google_Sheet.ino
@@ -21,7 +42,7 @@ IGNORE_FILES  ?= Pulse_Oximeter_Plus_Google_Sheet.ino
 # Optional extra flags for compiler
 EXTRA_FLAGS   ?=
 
-.PHONY: all build compile flash upload monitor clean ports boards help
+.PHONY: all build compile flash upload monitor clean ports boards help compile-beacon flash-beacon
 
 all: compile
 
@@ -88,7 +109,7 @@ ports boards:
 
 clean:
 	@echo "==> Cleaning build artifacts..."
-	@rm -rf $(BUILD_DIR)
+	@rm -rf $(BUILD_DIR) $(BEACON_BUILD)
 	@for f in $(IGNORE_FILES); do \
 		if [ -f "$(SKETCH_DIR)/.$$f.tmp_ignored" ]; then \
 			mv "$(SKETCH_DIR)/.$$f.tmp_ignored" "$(SKETCH_DIR)/$$f"; \
@@ -96,16 +117,39 @@ clean:
 	done
 	@echo "==> Clean done."
 
+compile-beacon:
+	@echo "==> Compiling BLE beacon emitter [BEACON=$(BEACON), index=$(BEACON_IDX)] for $(FQBN)..."
+	@mkdir -p $(BEACON_BUILD)
+	$(ARDUINO_CLI) compile \
+		--fqbn $(FQBN) \
+		--build-path $(BEACON_BUILD) \
+		$(if $(BOARD_OPTIONS),--board-options $(BOARD_OPTIONS),) \
+		$(BEACON_FLAGS) \
+		$(EXTRA_FLAGS) \
+		$(BEACON_DIR)
+	@echo "==> Beacon [$(BEACON)] compilation successful. Binaries located in $(BEACON_BUILD)/"
+
+flash-beacon: compile-beacon
+	@echo "==> Flashing BLE beacon emitter [BEACON=$(BEACON)] to $(PORT) using $(FQBN)..."
+	$(ARDUINO_CLI) upload \
+		--fqbn $(FQBN) \
+		--port $(PORT) \
+		--input-dir $(BEACON_BUILD) \
+		$(BEACON_DIR)
+	@echo "==> Beacon [$(BEACON)] flash completed successfully!"
+
 help:
 	@echo "Available targets:"
-	@echo "  make               - Compile the sketch (default target)"
-	@echo "  make compile       - Compile the sketch into build/"
-	@echo "  make flash         - Compile and upload firmware to board"
-	@echo "  make upload        - Alias for 'flash'"
-	@echo "  make monitor       - Open serial monitor (using tio or arduino-cli)"
-	@echo "  make ports         - List connected boards and serial ports"
-	@echo "  make clean         - Remove build directory"
-	@echo "  make help          - Display this help message"
+	@echo "  make                                - Compile the main workout monitor sketch"
+	@echo "  make compile                        - Compile the main sketch into build/"
+	@echo "  make flash                          - Compile and upload workout monitor to board"
+	@echo "  make compile-beacon BEACON=<type>   - Compile beacon (BEACON=curl, press, squat)"
+	@echo "  make flash-beacon BEACON=<type>     - Flash beacon (PORT=<device> BEACON=curl|press)"
+	@echo "  make upload                         - Alias for 'flash'"
+	@echo "  make monitor                        - Open serial monitor (using tio or arduino-cli)"
+	@echo "  make ports                          - List connected boards and serial ports"
+	@echo "  make clean                          - Remove build directories"
+	@echo "  make help                           - Display this help message"
 	@echo ""
 	@echo "Configuration variables (can override on command line):"
 	@echo "  FQBN=<fqbn>        (current: $(FQBN))"
