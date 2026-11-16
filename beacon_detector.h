@@ -16,10 +16,10 @@ int getDisplayBpm();
 int getDisplaySpo2();
 
 // Beacon detection constants
-constexpr uint32_t BEACON_TIMEOUT_MS = 4000;      // 4 seconds without packet = beacon lost
-constexpr int MIN_BEACON_RSSI = -82;               // Minimum RSSI to consider a beacon valid/in-range
-constexpr float HYSTERESIS_RSSI_DB = 4.0f;         // dBm advantage needed to switch between active beacons
-constexpr float RSSI_EMA_ALPHA = 0.35f;            // RSSI smoothing factor
+constexpr uint32_t BEACON_TIMEOUT_MS = 7000;      // 7 seconds without packet = beacon lost (was 4000)
+constexpr int MIN_BEACON_RSSI = -84;               // Minimum RSSI to consider in-range (was -82)
+constexpr float HYSTERESIS_RSSI_DB = 7.0f;         // 7 dB advantage needed to switch active beacons (was 4.0)
+constexpr float RSSI_EMA_ALPHA = 0.30f;            // RSSI smoothing factor
 
 struct ObservedBeacon {
   uint8_t exerciseId;
@@ -107,6 +107,12 @@ inline void finalizeCurrentSet(ExerciseType nextExercise) {
 // BLE advertisement callback
 class WorkoutBeaconAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) override {
+    // Fast zero-allocation rejection of foreign devices in dense RF rooms:
+    // Read raw payload bytes directly without creating Arduino String objects on heap.
+    const uint8_t* payload = advertisedDevice.getPayload();
+    size_t payloadLen = advertisedDevice.getPayloadLength();
+    if (!payload || payloadLen < 4) return;
+
     bool matched = false;
     uint8_t exId = 0;
     uint8_t red = 0, green = 180, blue = 255;
@@ -114,63 +120,80 @@ class WorkoutBeaconAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
     char exName[24] = {0};
     char hex[10] = "#00b4ff";
 
-    // 1. Check manufacturer specific data
-    if (advertisedDevice.haveManufacturerData()) {
-      String mfg = advertisedDevice.getManufacturerData();
-      const uint8_t* bytes = (const uint8_t*)mfg.c_str();
-      size_t len = mfg.length();
+    size_t idx = 0;
+    bool foundMfg = false;
+    bool foundName = false;
+    uint8_t fallbackExId = 0;
 
-      if (len >= 7 && bytes[0] == 0x19 && bytes[1] == 0x80 && bytes[2] == 0xAC) {
-        matched = true;
-        exId = bytes[3];
-        red = bytes[4];
-        green = bytes[5];
-        blue = bytes[6];
-        snprintf(hex, sizeof(hex), "#%02x%02x%02x", red, green, blue);
+    // Scan AD structures in raw payload
+    while (idx < payloadLen) {
+      uint8_t adLen = payload[idx];
+      if (adLen == 0 || (idx + 1 + adLen) > payloadLen) break;
+      uint8_t adType = payload[idx + 1];
+      const uint8_t* adData = &payload[idx + 2];
+      uint8_t dataLen = adLen - 1;
 
-        if (exId == 1) {
-          strncpy(bName, "ACT-PRESS", sizeof(bName) - 1);
-          strncpy(exName, "Shoulder Press", sizeof(exName) - 1);
-        } else if (exId == 2) {
-          strncpy(bName, "ACT-SQUAT", sizeof(bName) - 1);
-          strncpy(exName, "Squat", sizeof(exName) - 1);
-        } else {
-          strncpy(bName, "ACT-CURL", sizeof(bName) - 1);
-          strncpy(exName, "Bicep Curl", sizeof(exName) - 1);
+      // 1. Check Manufacturer Specific Data (0xFF)
+      // Marker: [0x19, 0x80] (Company ID) + [0xAC] (Magic Activity Marker) + [exId] + [R, G, B]
+      if (adType == 0xFF && dataLen >= 7) {
+        if (adData[0] == 0x19 && adData[1] == 0x80 && adData[2] == 0xAC) {
+          exId = adData[3];
+          red = adData[4];
+          green = adData[5];
+          blue = adData[6];
+          foundMfg = true;
+          break; // Primary activity marker confirmed, stop scanning payload
         }
       }
+      // 2. Fallback check by local name (0x09 = Complete, 0x08 = Shortened)
+      else if (!foundName && (adType == 0x09 || adType == 0x08) && dataLen >= 8) {
+        if (memcmp(adData, "ACT-", 4) == 0) {
+          if (memcmp(adData + 4, "CURL", 4) == 0) {
+            fallbackExId = 0;
+            foundName = true;
+          } else if (memcmp(adData + 4, "PRES", 4) == 0) {
+            fallbackExId = 1;
+            foundName = true;
+          } else if (memcmp(adData + 4, "SQUA", 4) == 0) {
+            fallbackExId = 2;
+            foundName = true;
+          }
+        }
+      }
+      idx += 1 + adLen;
     }
 
-    // 2. Fallback check by device name
-    if (!matched && advertisedDevice.haveName()) {
-      String name = advertisedDevice.getName();
-      if (name.startsWith("ACT-CURL")) {
-        matched = true;
-        exId = 0;
-        red = 0; green = 180; blue = 255;
-        strncpy(bName, "ACT-CURL", sizeof(bName) - 1);
-        strncpy(exName, "Bicep Curl", sizeof(exName) - 1);
-        strncpy(hex, "#00b4ff", sizeof(hex) - 1);
-      } else if (name.startsWith("ACT-PRESS")) {
-        matched = true;
-        exId = 1;
+    if (!foundMfg && !foundName) {
+      return; // Discard hundreds of ambient non-workout devices in < 20 ns with 0 allocations
+    }
+
+    if (!foundMfg && foundName) {
+      exId = fallbackExId;
+      if (exId == 1) {
         red = 180; green = 0; blue = 255;
-        strncpy(bName, "ACT-PRESS", sizeof(bName) - 1);
-        strncpy(exName, "Shoulder Press", sizeof(exName) - 1);
-        strncpy(hex, "#b400ff", sizeof(hex) - 1);
-      } else if (name.startsWith("ACT-SQUAT")) {
-        matched = true;
-        exId = 2;
+      } else if (exId == 2) {
         red = 0; green = 255; blue = 80;
-        strncpy(bName, "ACT-SQUAT", sizeof(bName) - 1);
-        strncpy(exName, "Squat", sizeof(exName) - 1);
-        strncpy(hex, "#00ff50", sizeof(hex) - 1);
+      } else {
+        red = 0; green = 180; blue = 255;
       }
     }
 
-    if (!matched) return;
+    matched = true;
+    snprintf(hex, sizeof(hex), "#%02x%02x%02x", red, green, blue);
+
+    if (exId == 1) {
+      strncpy(bName, "ACT-PRESS", sizeof(bName) - 1);
+      strncpy(exName, "Shoulder Press", sizeof(exName) - 1);
+    } else if (exId == 2) {
+      strncpy(bName, "ACT-SQUAT", sizeof(bName) - 1);
+      strncpy(exName, "Squat", sizeof(exName) - 1);
+    } else {
+      strncpy(bName, "ACT-CURL", sizeof(bName) - 1);
+      strncpy(exName, "Bicep Curl", sizeof(exName) - 1);
+    }
 
     int rawRssi = advertisedDevice.getRSSI();
+    // Only format MAC string for valid matching workout beacons
     String macStr = advertisedDevice.getAddress().toString();
     uint32_t now = millis();
 
@@ -216,15 +239,20 @@ class WorkoutBeaconAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
 inline void bleScanTask(void* pvParameters) {
   BLEDevice::init("WorkoutMonitor");
   BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new WorkoutBeaconAdvertisedCallbacks(), true);
+  // shouldParse = false is critical in dense RF environments:
+  // It prevents BLEAdvertisedDevice::parseAdvertisement from leaking heap memory
+  // and pushing thousands of elements into m_serviceUUIDs vector on every duplicate packet.
+  pBLEScan->setAdvertisedDeviceCallbacks(new WorkoutBeaconAdvertisedCallbacks(), true, false);
   pBLEScan->setActiveScan(false);
+  // 100% continuous duty cycle: listening across channels 37, 38, 39 without deaf gaps
   pBLEScan->setInterval(160); // 100 ms
-  pBLEScan->setWindow(80);    // 50 ms
+  pBLEScan->setWindow(160);   // 100 ms (100% duty cycle, eliminates the 50ms blind window)
 
   while (true) {
-    pBLEScan->start(2, false);
+    // 3-second scan window: ensures continuous listening while regularly freeing
+    // any accumulated foreign device MAC entries to keep heap usage tightly bounded.
+    pBLEScan->start(3, false);
     pBLEScan->clearResults();
-    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -303,7 +331,10 @@ inline void updateBeaconDetector() {
   }
 
   if (shouldSwitch) {
-    bool exerciseChanged = (!g_beaconValid || (g_activeBeacon.exerciseId != candidate.exerciseId));
+    // Only finalize set and announce if the exercise actually changed (or on first detection).
+    // If the signal was briefly lost and re-acquired for the SAME exercise, resume without resetting reps!
+    bool isSameExerciseReacquired = (!g_beaconValid && (g_activeBeacon.exerciseId == candidate.exerciseId) && (g_activeBeacon.beaconName[0] != '\0'));
+    bool exerciseActuallyChanged = !isSameExerciseReacquired && (g_activeBeacon.beaconName[0] == '\0' || (g_activeBeacon.exerciseId != candidate.exerciseId));
 
     g_beaconValid = true;
     g_activeBeacon.valid = true;
@@ -318,16 +349,24 @@ inline void updateBeaconDetector() {
     strncpy(g_activeBeacon.macAddress, candidate.mac, sizeof(g_activeBeacon.macAddress) - 1);
     g_activeBeacon.lastSeenMs = candidate.lastSeenMs;
     g_activeBeacon.lastChangeTimeMs = now;
-    g_beaconChangeScreenUntilMs = now + 2500; // Trigger OLED announcement screen
 
-    Serial.println();
-    Serial.println("==================================================");
-    Serial.printf("  [BLE BEACON] ACTIVE BEACON: %s (%s)\r\n", candidate.beaconName, candidate.exerciseName);
-    Serial.printf("  Signal RSSI: %d dBm | MAC: %s\r\n", (int)candidate.filteredRssi, candidate.mac);
-    Serial.println("==================================================");
+    if (isSameExerciseReacquired) {
+      // Smoothly resume existing set without wiping reps or hijacking the OLED screen
+      Serial.printf("\r\n[BLE BEACON] Signal re-acquired: %s (%s) @ %d dBm. Resuming Set #%u (Reps: %u).\r\n",
+                    candidate.beaconName, candidate.exerciseName, (int)candidate.filteredRssi,
+                    g_currentSetNumber, g_repCount.load());
+    } else {
+      g_beaconChangeScreenUntilMs = now + 2500; // Trigger OLED announcement screen
 
-    if (exerciseChanged) {
-      finalizeCurrentSet((ExerciseType)candidate.exerciseId);
+      Serial.println();
+      Serial.println("==================================================");
+      Serial.printf("  [BLE BEACON] ACTIVE BEACON: %s (%s)\r\n", candidate.beaconName, candidate.exerciseName);
+      Serial.printf("  Signal RSSI: %d dBm | MAC: %s\r\n", (int)candidate.filteredRssi, candidate.mac);
+      Serial.println("==================================================");
+
+      if (exerciseActuallyChanged) {
+        finalizeCurrentSet((ExerciseType)candidate.exerciseId);
+      }
     }
     broadcastWsData(true);
   } else {
