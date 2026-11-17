@@ -11,7 +11,6 @@
 
 // Forward declarations
 void broadcastWsData(bool forceHistory = false);
-void resetPressTracking();
 int getDisplayBpm();
 int getDisplaySpo2();
 
@@ -101,7 +100,6 @@ inline void finalizeCurrentSet(ExerciseType nextExercise) {
   g_exercise = nextExercise;
   g_fsmState = STATE_IDLE;
   g_currentRep = {0};
-  resetPressTracking();
 }
 
 // BLE advertisement callback
@@ -151,7 +149,7 @@ class WorkoutBeaconAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
           if (memcmp(adData + 4, "CURL", 4) == 0) {
             fallbackExId = 0;
             foundName = true;
-          } else if (memcmp(adData + 4, "PRES", 4) == 0) {
+          } else if (memcmp(adData + 4, "RAIS", 4) == 0 || memcmp(adData + 4, "PRES", 4) == 0) { // PRES: older emitters
             fallbackExId = 1;
             foundName = true;
           } else if (memcmp(adData + 4, "SQUA", 4) == 0) {
@@ -182,8 +180,8 @@ class WorkoutBeaconAdvertisedCallbacks : public BLEAdvertisedDeviceCallbacks {
     snprintf(hex, sizeof(hex), "#%02x%02x%02x", red, green, blue);
 
     if (exId == 1) {
-      strncpy(bName, "ACT-PRESS", sizeof(bName) - 1);
-      strncpy(exName, "Shoulder Press", sizeof(exName) - 1);
+      strncpy(bName, "ACT-RAISE", sizeof(bName) - 1);
+      strncpy(exName, "Lateral Raise", sizeof(exName) - 1);
     } else if (exId == 2) {
       strncpy(bName, "ACT-SQUAT", sizeof(bName) - 1);
       strncpy(exName, "Squat", sizeof(exName) - 1);

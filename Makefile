@@ -17,13 +17,13 @@ BUILD_DIR     ?= $(SKETCH_DIR)/build
 BEACON_DIR    ?= $(SKETCH_DIR)/beacon_emitter
 BEACON_BUILD  ?= $(BEACON_DIR)/build
 
-# Beacon selection for beacon emitter (curl, press, squat or 0, 1, 2)
+# Beacon selection for beacon emitter (curl, raise, squat or 0, 1, 2)
 BEACON        ?= curl
 ifeq ($(BEACON),curl)
   BEACON_IDX := 0
 else ifeq ($(BEACON),0)
   BEACON_IDX := 0
-else ifeq ($(BEACON),press)
+else ifeq ($(BEACON),raise)
   BEACON_IDX := 1
 else ifeq ($(BEACON),1)
   BEACON_IDX := 1
@@ -143,8 +143,8 @@ help:
 	@echo "  make                                - Compile the main workout monitor sketch"
 	@echo "  make compile                        - Compile the main sketch into build/"
 	@echo "  make flash                          - Compile and upload workout monitor to board"
-	@echo "  make compile-beacon BEACON=<type>   - Compile beacon (BEACON=curl, press, squat)"
-	@echo "  make flash-beacon BEACON=<type>     - Flash beacon (PORT=<device> BEACON=curl|press)"
+	@echo "  make compile-beacon BEACON=<type>   - Compile beacon (BEACON=curl, raise, squat)"
+	@echo "  make flash-beacon BEACON=<type>     - Flash beacon (PORT=<device> BEACON=curl|raise)"
 	@echo "  make upload                         - Alias for 'flash'"
 	@echo "  make monitor                        - Open serial monitor (using tio or arduino-cli)"
 	@echo "  make ports                          - List connected boards and serial ports"
