@@ -200,7 +200,7 @@ inline void showOledBeaconChanged() {
   g_oled.print(F("BEACON DETECTED"));
 
   g_oled.setTextColor(SSD1306_WHITE);
-  const char* exName = (g_exercise == EXERCISE_PRESS) ? "PRESS" : "CURL";
+  const char* exName = exerciseShortName(g_exercise);
   g_oled.setTextSize(2);
   int16_t x = (128 - (int16_t)(strlen(exName) * 12)) / 2;
   if (x < 0) x = 0;
@@ -308,9 +308,9 @@ inline void updateOledScreen() {
   g_oled.setCursor(0, 0);
   g_oled.printf("S#%u R:%u", (unsigned int)g_currentSetNumber, (unsigned int)g_repCount.load());
 
-  bool isPress = (g_exercise == EXERCISE_PRESS);
+  bool isRaise = (g_exercise == EXERCISE_LATERAL_RAISE);
   g_oled.setCursor(56, 0);
-  g_oled.print(isPress ? "PRESS" : "CURL");
+  g_oled.print(exerciseShortName(g_exercise));
 
   const char* stateStr = "IDLE";
   if (g_fsmState == STATE_CONCENTRIC) stateStr = "LIFT";
@@ -326,11 +326,7 @@ inline void updateOledScreen() {
 
   // Live kinematics
   g_oled.setCursor(0, 13);
-  if (isPress) {
-    g_oled.printf("Ht: %4.0fcm", g_kinematics.heightCm);
-  } else {
-    g_oled.printf("Ang: %4.1f\xF7", g_kinematics.angleDeg);
-  }
+  g_oled.printf("Ang: %4.1f\xF7", g_kinematics.angleDeg);
 
   g_oled.setCursor(76, 13);
   g_oled.printf("Q: %3.0f%%", g_kinematics.liveQuality);
@@ -361,17 +357,13 @@ inline void updateOledScreen() {
 
   if (g_lastCompletedRep.repNumber > 0) {
     g_oled.setCursor(76, 39);
-    if (g_lastCompletedRep.exercise == EXERCISE_PRESS) {
-      g_oled.printf("Pk: %2.0fcm", g_lastCompletedRep.peakHeightCm);
-    } else {
-      g_oled.printf("Pk: %2.0f\xF7", g_lastCompletedRep.peakAngleDeg);
-    }
+    g_oled.printf("Pk: %2.0f\xF7", g_lastCompletedRep.peakAngleDeg);
   }
 
-  // Gauge: curl angle (target 70 deg of 90) or press height (target 30 cm of 40)
-  float gaugeValue = isPress ? g_kinematics.heightCm : g_kinematics.angleDeg;
-  float gaugeMax = isPress ? 40.0f : 90.0f;
-  float gaugeTarget = isPress ? 30.0f : 70.0f;
+  // Gauge: curl angle (target 70 deg of 90) or raise angle (target shoulder height, 90 deg of 110)
+  float gaugeValue = g_kinematics.angleDeg;
+  float gaugeMax = isRaise ? 110.0f : 90.0f;
+  float gaugeTarget = isRaise ? 90.0f : 70.0f;
 
   g_oled.drawRect(0, 52, 128, 11, SSD1306_WHITE);
   int fillWidth = (int)((gaugeValue / gaugeMax) * 122.0f);

@@ -52,14 +52,21 @@ enum FsmState {
   STATE_COMPLETED
 };
 
-// Exercises
+// Exercises. Both are tracked by how far the forearm has rotated from the calibrated
+// arm-hanging position: an accelerometer measures tilt reliably, but not position.
+// Values match the beacon exercise IDs (0 = ACT-CURL, 1 = ACT-RAISE).
 enum ExerciseType {
-  EXERCISE_CURL,   // tracked by forearm angle
-  EXERCISE_PRESS   // shoulder press, tracked by vertical movement
+  EXERCISE_CURL,          // forearm swings up in front, elbow bends (~90-140 deg)
+  EXERCISE_LATERAL_RAISE  // straight arm lifts out to the side to shoulder height (~90 deg)
 };
 
 inline const char* exerciseName(ExerciseType ex) {
-  return (ex == EXERCISE_PRESS) ? "Shoulder Press" : "Bicep Curl";
+  return (ex == EXERCISE_LATERAL_RAISE) ? "Lateral Raise" : "Bicep Curl";
+}
+
+// Short label for the OLED and the web JSON
+inline const char* exerciseShortName(ExerciseType ex) {
+  return (ex == EXERCISE_LATERAL_RAISE) ? "RAISE" : "CURL";
 }
 
 extern ExerciseType g_exercise;
@@ -83,10 +90,6 @@ struct KinematicsState {
   float angularVelocity;
   float jerk;
   float liveQuality;
-  float upAccel;     // vertical acceleration with gravity removed, g (+ = up)
-  float upVelocity;  // vertical speed, m/s (+ = up)
-  float heightCm;    // height gained since the rep started, cm
-  float sideAccel;   // acceleration off the vertical, g (sway or tilt)
 };
 
 struct PulseOxState {
@@ -113,7 +116,6 @@ struct RepMetrics {
   float concentricDurationSec;
   float eccentricDurationSec;
   float peakAngleDeg;
-  float peakHeightCm;
   ExerciseType exercise;
   float qualitySum;
   uint32_t qualitySampleCount;
@@ -121,6 +123,7 @@ struct RepMetrics {
   bool flagFastDrop;
   bool flagHighJerk;
   bool flagLowROM;
+  bool flagTooHigh;   // lateral raise lifted well above shoulder height
   int avgBpm;
   int avgSpo2;
 };

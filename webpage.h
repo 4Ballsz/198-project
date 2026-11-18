@@ -313,20 +313,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         }
       }
 
-      const isPress = d.exercise === 'press';
       if (d.exercise !== undefined) {
-        document.getElementById('valExercise').innerText = isPress ? 'Shoulder Press' : 'Bicep Curl';
-        document.getElementById('lblMotion').innerText = isPress ? 'Height:' : 'Angle:';
-        document.getElementById('legendMotion').innerText = isPress ? 'Height (0-50 cm)' : 'Angle (0-140°)';
+        document.getElementById('valExercise').innerText = (d.exercise === 'raise') ? 'Lateral Raise' : 'Bicep Curl';
       }
-      if (isPress && d.height !== undefined) {
-        document.getElementById('valAngle').innerText = d.height.toFixed(0) + ' cm';
-      } else if (d.angle !== undefined) {
+      if (d.angle !== undefined) {
         document.getElementById('valAngle').innerText = d.angle.toFixed(1) + '°';
       }
-      if (isPress && d.upVel !== undefined) {
-        document.getElementById('valVel').innerText = (d.upVel >= 0 ? '+' : '') + d.upVel.toFixed(2) + ' m/s';
-      } else if (d.vel !== undefined) {
+      if (d.vel !== undefined) {
         document.getElementById('valVel').innerText = (d.vel >= 0 ? '+' : '') + d.vel.toFixed(1) + '°/s';
       }
       if (d.jerk !== undefined) document.getElementById('valJerk').innerText = d.jerk.toFixed(1);
@@ -355,7 +348,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       if (d.angle !== undefined) {
         motionHistory.shift();
-        motionHistory.push(isPress ? (d.height || 0) / 50 : d.angle / 140);
+        motionHistory.push(d.angle / 140);
         qHistory.shift();
         qHistory.push(d.q || 100);
         hrHistory.shift();
@@ -373,7 +366,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           d.sets.forEach(s => {
             const tr = document.createElement('tr');
             const hrStr = (s.bpm && s.bpm > 0) ? `${s.bpm} bpm` : '--';
-            const exName = (s.ex === 'press') ? 'Shoulder Press' : 'Bicep Curl';
+            const exName = (s.ex === 'raise') ? 'Lateral Raise' : 'Bicep Curl';
             tr.innerHTML = `
               <td><b>#${s.set}</b></td>
               <td>${exName}</td>
@@ -397,7 +390,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           tr.innerHTML = `
             <td><b>${r.rep}</b></td>
             <td>${r.q.toFixed(1)}%</td>
-            <td>${r.peak.toFixed(1)}${r.ex === 'press' ? ' cm' : '°'}</td>
+            <td>${r.peak.toFixed(1)}°</td>
             <td>${r.con.toFixed(2)}s</td>
             <td>${r.ecc.toFixed(2)}s</td>
             <td>${hrStr}</td>

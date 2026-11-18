@@ -41,10 +41,44 @@ float restZ_g = 1.0f;
 bool isCalibrated = false;
 
 ExerciseType g_exercise = EXERCISE_CURL;
-// Smoothed gravity reading while still: the direction that counts as "up" for the press
-float upX_g = 0.0f;
-float upY_g = 0.0f;
-float upZ_g = 1.0f;
+
+// Per-exercise rep thresholds. Every exercise is counted the same way, by the forearm's
+// angle away from the calibrated arm-hanging position; only these limits differ.
+struct AngleRepProfile {
+  float startDeg;       // angle that starts a rep (with startVel)
+  float startVel;       // deg/s upward needed to start a rep
+  float peakDeg;        // angle that counts as reaching the top
+  float abortDeg;       // dropping back below this before the top cancels the rep
+  float completeDeg;    // returning below this after the top completes the rep
+  float romTargetDeg;   // full range of motion for the quality score
+  float tooHighDeg;     // above this is lifting too high (0 = no limit)
+  float maxLowerVel;    // deg/s; lowering faster than this costs quality
+  float fastDropVel;    // deg/s; lowering faster than this flags "Lowered too fast"
+  bool partialReturnOk; // rep may end when lowering stops partway down (arm not back at its side)
+};
+
+// Bicep curl: elbow bends, forearm swings ~90-140 deg up in front
+constexpr AngleRepProfile CURL_PROFILE  = {28.0f, 15.0f, 70.0f, 20.0f, 22.0f, 85.0f, 0.0f,   90.0f, 160.0f, false};
+// Lateral raise: straight arm lifts out to the side; shoulder height is ~90 deg.
+// Going far above shoulder height is discouraged for older adults (shoulder impingement).
+// Between reps the arm often stays slightly out from the body instead of hanging at 0 deg,
+// so a rep also ends once the lowering stops at least halfway back down.
+constexpr AngleRepProfile RAISE_PROFILE = {25.0f, 15.0f, 65.0f, 18.0f, 20.0f, 85.0f, 110.0f, 90.0f, 160.0f, true};
+
+// Where the arm actually rests between reps (deg). Learned while idle and still, so a rep
+// that starts and ends a little away from the calibrated hanging position is still counted.
+float g_restAngleDeg = 0.0f;
+constexpr float MAX_REST_ANGLE_DEG = 40.0f;    // arm held further out than this isn't "resting"
+uint32_t g_lowerStallStartMs = 0;              // when the arm stopped moving during lowering (0 = moving)
+constexpr uint32_t LOWER_STALL_MS = 300;       // lowering paused this long = arm has come to rest
+
+inline const AngleRepProfile& profileFor(ExerciseType ex) {
+  return (ex == EXERCISE_LATERAL_RAISE) ? RAISE_PROFILE : CURL_PROFILE;
+}
+
+inline const AngleRepProfile& activeProfile() {
+  return profileFor(g_exercise);
+}
 
 AccelerometerSample g_sensor = {0};
 KinematicsState g_kinematics = {0};
@@ -140,68 +174,6 @@ void computeKinematics(float dt_sec) {
   g_kinematics.jerk = (0.35f * rawJerk) + (0.65f * g_kinematics.jerk);
 }
 
-// press tracking reset
-void resetPressTracking() {
-  upX_g = g_sensor.filtered_ax;
-  upY_g = g_sensor.filtered_ay;
-  upZ_g = g_sensor.filtered_az;
-  g_kinematics.upAccel = 0.0f;
-  g_kinematics.upVelocity = 0.0f;
-  g_kinematics.heightCm = 0.0f;
-  g_kinematics.sideAccel = 0.0f;
-}
-
-// linear kinematics (shoulder press)
-void computeLinearKinematics(float dt_sec) {
-  float ax = g_sensor.filtered_ax;
-  float ay = g_sensor.filtered_ay;
-  float az = g_sensor.filtered_az;
-
-  // Learn which way is up only while resting, so the press itself doesn't skew it.
-  // Adapt faster when the arm has clearly changed position (e.g. hands raised to the shoulders).
-  if (g_fsmState == STATE_IDLE) {
-    float upLpf = (g_kinematics.sideAccel > 0.30f) ? 0.15f : 0.03f;
-    upX_g = (upLpf * ax) + ((1.0f - upLpf) * upX_g);
-    upY_g = (upLpf * ay) + ((1.0f - upLpf) * upY_g);
-    upZ_g = (upLpf * az) + ((1.0f - upLpf) * upZ_g);
-  }
-
-  float upMag = sqrtf((upX_g * upX_g) + (upY_g * upY_g) + (upZ_g * upZ_g));
-  if (upMag < 0.0001f || dt_sec < 0.0001f) return;
-  float ux = upX_g / upMag;
-  float uy = upY_g / upMag;
-  float uz = upZ_g / upMag;
-
-  // Split the reading into the part along "up" and the part off to the side
-  float along = (ax * ux) + (ay * uy) + (az * uz);
-  float sx = ax - (along * ux);
-  float sy = ay - (along * uy);
-  float sz = az - (along * uz);
-  g_kinematics.sideAccel = sqrtf((sx * sx) + (sy * sy) + (sz * sz));
-
-  // Remove gravity; ignore tiny values so noise doesn't build up into speed
-  float upAccel = along - upMag;
-  if (fabsf(upAccel) < 0.03f) upAccel = 0.0f;
-  g_kinematics.upAccel = upAccel;
-
-  // Speed = running total of acceleration, slowly leaking back to 0 to limit drift
-  g_kinematics.upVelocity += upAccel * 9.81f * dt_sec;
-  g_kinematics.upVelocity *= 0.99f;
-
-  if (g_fsmState == STATE_IDLE) {
-    // While resting: ignore movement while "up" is still adjusting to a new arm position, and settle speed to 0
-    if (g_kinematics.sideAccel > 0.30f || upMag < 0.85f) {
-      g_kinematics.upVelocity = 0.0f;
-    } else if (upAccel == 0.0f) {
-      g_kinematics.upVelocity *= 0.80f;
-    }
-    g_kinematics.heightCm = 0.0f;
-  } else {
-    // Height = running total of speed during the rep
-    g_kinematics.heightCm += g_kinematics.upVelocity * dt_sec * 100.0f;
-  }
-}
-
 // form quality
 void updateLiveQuality() {
   if (g_fsmState == STATE_IDLE) {
@@ -219,29 +191,26 @@ void updateLiveQuality() {
     }
   }
 
-  if (g_exercise == EXERCISE_PRESS) {
-    // Lowering too fast (m/s)
-    if (g_kinematics.upVelocity < -0.50f) {
-      float dropExcess = (-g_kinematics.upVelocity) - 0.50f;
-      instantQ -= (dropExcess * 150.0f);
-      if (g_kinematics.upVelocity < -0.80f) {
-        g_currentRep.flagFastDrop = true;
-      }
-    }
+  const AngleRepProfile& prof = activeProfile();
 
-    // Swaying or pressing at an angle
-    if (g_kinematics.sideAccel > 0.30f) {
-      instantQ -= (g_kinematics.sideAccel - 0.30f) * 120.0f;
+  // Lowering too fast (dropping the weight instead of controlling it)
+  if (g_kinematics.angularVelocity < -prof.maxLowerVel) {
+    float dropExcess = (-g_kinematics.angularVelocity) - prof.maxLowerVel;
+    instantQ -= (dropExcess * 0.70f);
+    if (g_kinematics.angularVelocity < -prof.fastDropVel) {
+      g_currentRep.flagFastDrop = true;
+    }
+  }
+
+  if (g_exercise == EXERCISE_LATERAL_RAISE) {
+    // Lifting well above shoulder height
+    if (prof.tooHighDeg > 0.0f && g_kinematics.angleDeg > prof.tooHighDeg) {
+      instantQ -= (g_kinematics.angleDeg - prof.tooHighDeg) * 2.0f;
+      g_currentRep.flagTooHigh = true;
     }
   } else {
-    if (g_kinematics.angularVelocity < -90.0f) {
-      float dropExcess = (-g_kinematics.angularVelocity) - 90.0f;
-      instantQ -= (dropExcess * 0.70f);
-      if (g_kinematics.angularVelocity < -160.0f) {
-        g_currentRep.flagFastDrop = true;
-      }
-    }
-
+    // Curl: the elbow should hinge in one plane, so the sensor's Y (hinge) axis should barely change.
+    // Not checked for the raise: the forearm can be turned any way during a raise, so no fixed axis works.
     float lateralDev = fabsf(g_sensor.filtered_ay - restY_g);
     if (lateralDev > 0.45f) {
       instantQ -= (lateralDev - 0.45f) * 60.0f;
@@ -331,19 +300,36 @@ void updateNeoPixelFeedback() {
 
 void printRepSummary();
 
-// Curl FSM (forearm angle)
-void processCurlFSM(uint32_t now) {
+// Rep FSM by forearm angle (curl and lateral raise; thresholds from the active profile)
+void processAngleFSM(uint32_t now) {
+  const AngleRepProfile& prof = activeProfile();
+
+  // Thresholds are relative to where the arm rests, but never below the profile's fixed values,
+  // so with the arm hanging at 0 deg the behaviour is unchanged.
+  float rest = g_restAngleDeg;
+  float startAt = fmaxf(prof.startDeg, rest + 15.0f);
+  float abortAt = fmaxf(prof.abortDeg, rest + 8.0f);
+  float completeAt = fmaxf(prof.completeDeg, rest + 12.0f);
+
   switch (g_fsmState) {
     case STATE_IDLE: {
-      if (g_kinematics.angleDeg > 28.0f && g_kinematics.angularVelocity > 15.0f) {
+      // Learn the resting angle only while the arm is still
+      if (fabsf(g_kinematics.angularVelocity) < 10.0f) {
+        g_restAngleDeg += 0.05f * (g_kinematics.angleDeg - g_restAngleDeg);
+        if (g_restAngleDeg < 0.0f) g_restAngleDeg = 0.0f;
+        if (g_restAngleDeg > MAX_REST_ANGLE_DEG) g_restAngleDeg = MAX_REST_ANGLE_DEG;
+      }
+
+      if (g_kinematics.angleDeg > startAt && g_kinematics.angularVelocity > prof.startVel) {
         g_fsmState = STATE_CONCENTRIC;
         g_currentRep = {0};
-        g_currentRep.exercise = EXERCISE_CURL;
+        g_currentRep.exercise = g_exercise;
         g_currentRep.startTimeMs = now;
         g_currentRep.peakAngleDeg = g_kinematics.angleDeg;
         g_kinematics.liveQuality = 100.0f;
+        g_lowerStallStartMs = 0;
         if (!g_paused && !g_plotterMode) {
-          Serial.println("\r\n[REP STARTED]");
+          Serial.printf("\r\n[REP STARTED] (arm resting at %.0f°)\r\n", rest);
         }
       }
       break;
@@ -354,8 +340,8 @@ void processCurlFSM(uint32_t now) {
         g_currentRep.peakAngleDeg = g_kinematics.angleDeg;
       }
 
-      bool reachedPeak = (g_kinematics.angleDeg >= 70.0f && g_kinematics.angularVelocity <= 12.0f);
-      bool alreadyDescending = (g_currentRep.peakAngleDeg >= 68.0f && g_kinematics.angleDeg <= (g_currentRep.peakAngleDeg - 5.0f) && g_kinematics.angularVelocity < 0.0f);
+      bool reachedPeak = (g_kinematics.angleDeg >= prof.peakDeg && g_kinematics.angularVelocity <= 12.0f);
+      bool alreadyDescending = (g_currentRep.peakAngleDeg >= (prof.peakDeg - 2.0f) && g_kinematics.angleDeg <= (g_currentRep.peakAngleDeg - 5.0f) && g_kinematics.angularVelocity < 0.0f);
 
       if (reachedPeak || alreadyDescending) {
         g_fsmState = STATE_PEAK;
@@ -363,10 +349,10 @@ void processCurlFSM(uint32_t now) {
         g_currentRep.concentricDurationSec = (float)(now - g_currentRep.startTimeMs) / 1000.0f;
       }
 
-      if (g_kinematics.angleDeg < 20.0f) {
+      if (g_fsmState == STATE_CONCENTRIC && g_kinematics.angleDeg < abortAt) {
         g_fsmState = STATE_IDLE;
         if (!g_paused && !g_plotterMode) {
-          Serial.printf("\r\n[REP ABORTED] Peak reached: %.1f° (needed >= 68°)\r\n", g_currentRep.peakAngleDeg);
+          Serial.printf("\r\n[REP ABORTED] Peak reached: %.1f° (needed >= %.0f°)\r\n", g_currentRep.peakAngleDeg, prof.peakDeg - 2.0f);
         }
       }
 
@@ -391,102 +377,34 @@ void processCurlFSM(uint32_t now) {
     }
 
     case STATE_ECCENTRIC: {
-      if (g_kinematics.angleDeg < 22.0f) {
-        g_fsmState = STATE_COMPLETED;
-        g_currentRep.completeTimeMs = now;
-        g_currentRep.eccentricDurationSec = (float)(now - g_currentRep.peakTimeMs) / 1000.0f;
-      }
+      // Back near the resting position
+      bool returned = (g_kinematics.angleDeg < completeAt);
 
-      if (now - g_currentRep.startTimeMs > 8000) {
-        g_fsmState = STATE_IDLE;
-        if (!g_paused && !g_plotterMode) {
-          Serial.println("\r\n[REP TIMEOUT]");
-        }
-      }
-      break;
-    }
-
-    case STATE_COMPLETED:
-      break;
-  }
-}
-
-// Shoulder press FSM (vertical speed and height)
-void processPressFSM(uint32_t now) {
-  float vel = g_kinematics.upVelocity;
-  float height = g_kinematics.heightCm;
-
-  switch (g_fsmState) {
-    case STATE_IDLE: {
-      // Moving up, with the arm in its learned "up" position (not being repositioned)
-      if (vel > 0.15f && g_kinematics.sideAccel < 0.30f) {
-        g_fsmState = STATE_CONCENTRIC;
-        g_currentRep = {0};
-        g_currentRep.exercise = EXERCISE_PRESS;
-        g_currentRep.startTimeMs = now;
-        g_kinematics.liveQuality = 100.0f;
-        if (!g_paused && !g_plotterMode) {
-          Serial.println("\r\n[REP STARTED]");
-        }
-      }
-      break;
-    }
-
-    case STATE_CONCENTRIC: {
-      if (height > g_currentRep.peakHeightCm) {
-        g_currentRep.peakHeightCm = height;
-      }
-
-      // Pushing has stopped: the top, if the arm went far enough
-      if (vel < 0.05f) {
-        if (g_currentRep.peakHeightCm >= 12.0f) {
-          g_fsmState = STATE_PEAK;
-          g_currentRep.peakTimeMs = now;
-          g_currentRep.concentricDurationSec = (float)(now - g_currentRep.startTimeMs) / 1000.0f;
+      // Or (raise): lowering stopped at least halfway back down and the arm is now still
+      bool stoppedPartway = false;
+      if (prof.partialReturnOk) {
+        float halfway = rest + 0.5f * (g_currentRep.peakAngleDeg - rest);
+        bool still = (fabsf(g_kinematics.angularVelocity) < 8.0f);
+        if (still && g_kinematics.angleDeg < halfway) {
+          if (g_lowerStallStartMs == 0) g_lowerStallStartMs = now;
+          stoppedPartway = (now - g_lowerStallStartMs >= LOWER_STALL_MS);
         } else {
-          g_fsmState = STATE_IDLE;
-          if (!g_paused && !g_plotterMode) {
-            Serial.printf("\r\n[REP ABORTED] Pressed %.0f cm (needed >= 12 cm)\r\n", g_currentRep.peakHeightCm);
-          }
+          g_lowerStallStartMs = 0;
         }
       }
 
-      if (g_fsmState == STATE_CONCENTRIC && now - g_currentRep.startTimeMs > 6000) {
-        g_fsmState = STATE_IDLE;
-        if (!g_paused && !g_plotterMode) {
-          Serial.println("\r\n[REP TIMEOUT]");
-        }
-      }
-      break;
-    }
-
-    case STATE_PEAK: {
-      if (height > g_currentRep.peakHeightCm) {
-        g_currentRep.peakHeightCm = height;
-      }
-
-      if (vel < -0.15f) {
-        g_fsmState = STATE_ECCENTRIC;
-      }
-
-      if (now - g_currentRep.startTimeMs > 10000) {
-        g_fsmState = STATE_IDLE;
-        if (!g_paused && !g_plotterMode) {
-          Serial.println("\r\n[REP TIMEOUT]");
-        }
-      }
-      break;
-    }
-
-    case STATE_ECCENTRIC: {
-      // Stopped lowering, at least halfway back down
-      if (vel > -0.05f && height < (g_currentRep.peakHeightCm * 0.5f)) {
+      if (returned || stoppedPartway) {
         g_fsmState = STATE_COMPLETED;
-        g_currentRep.completeTimeMs = now;
-        g_currentRep.eccentricDurationSec = (float)(now - g_currentRep.peakTimeMs) / 1000.0f;
+        // If it stopped partway, lowering ended when the arm went still, not after the wait
+        uint32_t endMs = stoppedPartway ? g_lowerStallStartMs : now;
+        g_currentRep.completeTimeMs = endMs;
+        g_currentRep.eccentricDurationSec = (float)(endMs - g_currentRep.peakTimeMs) / 1000.0f;
+        if (stoppedPartway && !g_paused && !g_plotterMode) {
+          Serial.printf("\r\n[REP] Arm came to rest at %.0f° (not fully lowered)\r\n", g_kinematics.angleDeg);
+        }
       }
 
-      if (now - g_currentRep.startTimeMs > 10000) {
+      if (g_fsmState == STATE_ECCENTRIC && now - g_currentRep.startTimeMs > 8000) {
         g_fsmState = STATE_IDLE;
         if (!g_paused && !g_plotterMode) {
           Serial.println("\r\n[REP TIMEOUT]");
@@ -510,16 +428,10 @@ void completeRep(uint32_t now) {
                      : 80.0f;
 
   float romScore = 100.0f;
-  if (g_currentRep.exercise == EXERCISE_PRESS) {
-    if (g_currentRep.peakHeightCm < 30.0f) {
-      romScore -= (30.0f - g_currentRep.peakHeightCm) * 3.0f;
-      g_currentRep.flagLowROM = true;
-    }
-  } else {
-    if (g_currentRep.peakAngleDeg < 85.0f) {
-      romScore -= (85.0f - g_currentRep.peakAngleDeg) * 3.0f;
-      g_currentRep.flagLowROM = true;
-    }
+  float romTarget = profileFor(g_currentRep.exercise).romTargetDeg;
+  if (g_currentRep.peakAngleDeg < romTarget) {
+    romScore -= (romTarget - g_currentRep.peakAngleDeg) * 3.0f;
+    g_currentRep.flagLowROM = true;
   }
   if (romScore < 0.0f) romScore = 0.0f;
 
@@ -559,10 +471,8 @@ void processRepFSM() {
 
   if (g_fsmState == STATE_COMPLETED) {
     completeRep(now);
-  } else if (g_exercise == EXERCISE_PRESS) {
-    processPressFSM(now);
   } else {
-    processCurlFSM(now);
+    processAngleFSM(now);
   }
 }
 
@@ -576,11 +486,7 @@ void printRepSummary() {
   Serial.println("=========================================");
   Serial.printf("Exercise:            %s\r\n", exerciseName(g_lastCompletedRep.exercise));
   Serial.printf("Quality:             %.1f%%\r\n", g_lastCompletedRep.finalQualityFactor);
-  if (g_lastCompletedRep.exercise == EXERCISE_PRESS) {
-    Serial.printf("Press Height:        %.0f cm (estimated)\r\n", g_lastCompletedRep.peakHeightCm);
-  } else {
-    Serial.printf("Peak Angle:          %.1f deg\r\n", g_lastCompletedRep.peakAngleDeg);
-  }
+  Serial.printf("Peak Angle:          %.1f deg\r\n", g_lastCompletedRep.peakAngleDeg);
   Serial.printf("Concentric Duration: %.2f s\r\n", g_lastCompletedRep.concentricDurationSec);
   Serial.printf("Eccentric Duration:  %.2f s\r\n", g_lastCompletedRep.eccentricDurationSec);
   if (g_lastCompletedRep.avgBpm > 0) {
@@ -602,6 +508,10 @@ void printRepSummary() {
     Serial.print("[Jerky lift] ");
     hasFlag = true;
   }
+  if (g_lastCompletedRep.flagTooHigh) {
+    Serial.print("[Above shoulder] ");
+    hasFlag = true;
+  }
   if (!hasFlag) {
     Serial.print("[Clean]");
   }
@@ -618,13 +528,11 @@ void printTelemetry() {
   float coreTemp = getCoreTemp();
 
   if (g_plotterMode) {
-    Serial.printf("Angle:%.1f,Vel:%.1f,Jerk:%.1f,Q:%.1f,UpVel:%.2f,Height:%.1f,BPM:%d,SpO2:%d,Temp:%.1f\r\n",
+    Serial.printf("Angle:%.1f,Vel:%.1f,Jerk:%.1f,Q:%.1f,BPM:%d,SpO2:%d,Temp:%.1f\r\n",
                   g_kinematics.angleDeg,
                   g_kinematics.angularVelocity,
                   g_kinematics.jerk,
                   g_kinematics.liveQuality,
-                  g_kinematics.upVelocity,
-                  g_kinematics.heightCm,
                   curBpm,
                   curSpo2,
                   coreTemp);
@@ -647,14 +555,9 @@ void printTelemetry() {
     snprintf(pulseStr, sizeof(pulseStr), "HR: [Measuring...]");
   }
 
-  char motionStr[48];
-  if (g_exercise == EXERCISE_PRESS) {
-    snprintf(motionStr, sizeof(motionStr), "Height: %5.1fcm | Vel: %+5.2fm/s",
-             g_kinematics.heightCm, g_kinematics.upVelocity);
-  } else {
-    snprintf(motionStr, sizeof(motionStr), "Angle: %5.1f° | Vel: %+6.1f°/s",
-             g_kinematics.angleDeg, g_kinematics.angularVelocity);
-  }
+  char motionStr[56];
+  snprintf(motionStr, sizeof(motionStr), "%s Angle: %5.1f° | Vel: %+6.1f°/s",
+           exerciseShortName(g_exercise), g_kinematics.angleDeg, g_kinematics.angularVelocity);
 
   char beaconStr[32];
   if (g_beaconValid) {
@@ -749,7 +652,7 @@ void calibrateRestPosition() {
   g_fsmState = STATE_IDLE;
   g_kinematics = {0};
   g_currentRep = {0};
-  resetPressTracking();
+  g_restAngleDeg = 0.0f;  // the arm was just calibrated hanging at 0 deg
 
   float magRest = sqrtf(restX_g * restX_g + restY_g * restY_g + restZ_g * restZ_g);
   Serial.println("[CALIBRATION COMPLETE] Arm rest baseline locked:");
@@ -769,7 +672,7 @@ void printHelp() {
   Serial.println("  'c'        -> Calibrate arm hang position");
   Serial.println("  'r'        -> Reset rep count and sets");
   Serial.println("  'b'        -> BLE Workout Beacon status");
-  Serial.println("  'e'        -> Switch exercise (curl / shoulder press)");
+  Serial.println("  'e'        -> Switch exercise (curl / lateral raise)");
   Serial.println("  'o'        -> Pulse Oximeter status");
   Serial.println("  'g'        -> Toggle Google Sheets logging");
   Serial.println("  'w'        -> Show Wi-Fi / IP connection status");
@@ -792,7 +695,7 @@ void handleApiData() {
   else if (g_fsmState == STATE_ECCENTRIC) stateStr = "LOWERING";
 
   String json = "{";
-  json += "\"exercise\":\"" + String(g_exercise == EXERCISE_PRESS ? "press" : "curl") + "\",";
+  json += "\"exercise\":\"" + String(g_exercise == EXERCISE_LATERAL_RAISE ? "raise" : "curl") + "\",";
   json += "\"beacon\":{";
   json += "\"valid\":" + String(g_beaconValid ? "true" : "false") + ",";
   json += "\"name\":\"" + String(g_activeBeacon.beaconName) + "\",";
@@ -801,8 +704,6 @@ void handleApiData() {
   json += "\"color\":\"" + String(g_activeBeacon.hexColor) + "\"},";
   json += "\"set\":" + String(g_currentSetNumber) + ",";
   json += "\"angle\":" + String(g_kinematics.angleDeg, 1) + ",";
-  json += "\"height\":" + String(g_kinematics.heightCm, 1) + ",";
-  json += "\"upVel\":" + String(g_kinematics.upVelocity, 2) + ",";
   json += "\"vel\":" + String(g_kinematics.angularVelocity, 1) + ",";
   json += "\"jerk\":" + String(g_kinematics.jerk, 1) + ",";
   json += "\"q\":" + String(g_kinematics.liveQuality, 1) + ",";
@@ -821,9 +722,9 @@ void handleApiData() {
   json += "\"sets\":[";
   for (size_t i = 0; i < g_setHistoryCount; i++) {
     if (i > 0) json += ",";
-    bool isPress = (g_setHistory[i].exercise == EXERCISE_PRESS);
+    bool isRaise = (g_setHistory[i].exercise == EXERCISE_LATERAL_RAISE);
     json += "{\"set\":" + String(g_setHistory[i].setNumber) + ",";
-    json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+    json += "\"ex\":\"" + String(isRaise ? "raise" : "curl") + "\",";
     json += "\"reps\":" + String(g_setHistory[i].repCount) + ",";
     json += "\"q\":" + String(g_setHistory[i].avgQuality, 1) + ",";
     json += "\"dur\":" + String(g_setHistory[i].durationSec) + ",";
@@ -839,13 +740,14 @@ void handleApiData() {
     if (g_repHistory[i].flagLowROM) diag += "Low ROM ";
     if (g_repHistory[i].flagFastDrop) diag += "Lowered too fast ";
     if (g_repHistory[i].flagHighJerk) diag += "Jerky lift ";
+    if (g_repHistory[i].flagTooHigh) diag += "Above shoulder ";
     if (diag.length() == 0) diag = "Clean";
 
-    bool isPress = (g_repHistory[i].exercise == EXERCISE_PRESS);
+    bool isRaise = (g_repHistory[i].exercise == EXERCISE_LATERAL_RAISE);
     json += "{\"rep\":" + String(g_repHistory[i].repNumber) + ",";
-    json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+    json += "\"ex\":\"" + String(isRaise ? "raise" : "curl") + "\",";
     json += "\"q\":" + String(g_repHistory[i].finalQualityFactor, 1) + ",";
-    json += "\"peak\":" + String(isPress ? g_repHistory[i].peakHeightCm : g_repHistory[i].peakAngleDeg, 1) + ",";
+    json += "\"peak\":" + String(g_repHistory[i].peakAngleDeg, 1) + ",";
     json += "\"con\":" + String(g_repHistory[i].concentricDurationSec, 2) + ",";
     json += "\"ecc\":" + String(g_repHistory[i].eccentricDurationSec, 2) + ",";
     json += "\"bpm\":" + String(g_repHistory[i].avgBpm) + ",";
@@ -868,7 +770,7 @@ void broadcastWsData(bool forceHistory) {
   else if (g_fsmState == STATE_ECCENTRIC) stateStr = "LOWERING";
 
   String json = "{";
-  json += "\"exercise\":\"" + String(g_exercise == EXERCISE_PRESS ? "press" : "curl") + "\",";
+  json += "\"exercise\":\"" + String(g_exercise == EXERCISE_LATERAL_RAISE ? "raise" : "curl") + "\",";
   json += "\"beacon\":{";
   json += "\"valid\":" + String(g_beaconValid ? "true" : "false") + ",";
   json += "\"name\":\"" + String(g_activeBeacon.beaconName) + "\",";
@@ -877,8 +779,6 @@ void broadcastWsData(bool forceHistory) {
   json += "\"color\":\"" + String(g_activeBeacon.hexColor) + "\"},";
   json += "\"set\":" + String(g_currentSetNumber) + ",";
   json += "\"angle\":" + String(g_kinematics.angleDeg, 1) + ",";
-  json += "\"height\":" + String(g_kinematics.heightCm, 1) + ",";
-  json += "\"upVel\":" + String(g_kinematics.upVelocity, 2) + ",";
   json += "\"vel\":" + String(g_kinematics.angularVelocity, 1) + ",";
   json += "\"jerk\":" + String(g_kinematics.jerk, 1) + ",";
   json += "\"q\":" + String(g_kinematics.liveQuality, 1) + ",";
@@ -901,9 +801,9 @@ void broadcastWsData(bool forceHistory) {
     json += ",\"sets\":[";
     for (size_t i = 0; i < g_setHistoryCount; i++) {
       if (i > 0) json += ",";
-      bool isPress = (g_setHistory[i].exercise == EXERCISE_PRESS);
+      bool isRaise = (g_setHistory[i].exercise == EXERCISE_LATERAL_RAISE);
       json += "{\"set\":" + String(g_setHistory[i].setNumber) + ",";
-      json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+      json += "\"ex\":\"" + String(isRaise ? "raise" : "curl") + "\",";
       json += "\"reps\":" + String(g_setHistory[i].repCount) + ",";
       json += "\"q\":" + String(g_setHistory[i].avgQuality, 1) + ",";
       json += "\"dur\":" + String(g_setHistory[i].durationSec) + ",";
@@ -916,13 +816,14 @@ void broadcastWsData(bool forceHistory) {
       if (g_repHistory[i].flagLowROM) diag += "Low ROM ";
       if (g_repHistory[i].flagFastDrop) diag += "Lowered too fast ";
       if (g_repHistory[i].flagHighJerk) diag += "Jerky lift ";
+      if (g_repHistory[i].flagTooHigh) diag += "Above shoulder ";
       if (diag.length() == 0) diag = "Clean";
 
-      bool isPress = (g_repHistory[i].exercise == EXERCISE_PRESS);
+      bool isRaise = (g_repHistory[i].exercise == EXERCISE_LATERAL_RAISE);
       json += "{\"rep\":" + String(g_repHistory[i].repNumber) + ",";
-      json += "\"ex\":\"" + String(isPress ? "press" : "curl") + "\",";
+      json += "\"ex\":\"" + String(isRaise ? "raise" : "curl") + "\",";
       json += "\"q\":" + String(g_repHistory[i].finalQualityFactor, 1) + ",";
-      json += "\"peak\":" + String(isPress ? g_repHistory[i].peakHeightCm : g_repHistory[i].peakAngleDeg, 1) + ",";
+      json += "\"peak\":" + String(g_repHistory[i].peakAngleDeg, 1) + ",";
       json += "\"con\":" + String(g_repHistory[i].concentricDurationSec, 2) + ",";
       json += "\"ecc\":" + String(g_repHistory[i].eccentricDurationSec, 2) + ",";
       json += "\"bpm\":" + String(g_repHistory[i].avgBpm) + ",";
@@ -941,16 +842,13 @@ void setExercise(ExerciseType ex) {
   g_exercise = ex;
   g_fsmState = STATE_IDLE;
   g_currentRep = {0};
-  resetPressTracking();
   Serial.printf("\r\n[EXERCISE] Now tracking: %s\r\n", exerciseName(ex));
-  if (ex == EXERCISE_PRESS) {
-    Serial.println("[EXERCISE] Hold your hands at your shoulders for ~2 s before the first press.");
-  }
+  // Both exercises start from the same arm-hanging position, so no recalibration is needed
   broadcastWsData(false);
 }
 
 void toggleExercise() {
-  setExercise(g_exercise == EXERCISE_PRESS ? EXERCISE_CURL : EXERCISE_PRESS);
+  setExercise(g_exercise == EXERCISE_LATERAL_RAISE ? EXERCISE_CURL : EXERCISE_LATERAL_RAISE);
 }
 
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -1223,7 +1121,6 @@ void loop() {
 
     sampleAccelerometer();
     computeKinematics(dt_sec);
-    computeLinearKinematics(dt_sec);
     updateLiveQuality();
     processRepFSM();
     updateNeoPixelFeedback();

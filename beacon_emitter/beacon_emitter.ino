@@ -20,14 +20,14 @@ struct BeaconProfile {
 
 const BeaconProfile BEACON_PROFILES[] = {
   { 0, "ACT-CURL",  "Bicep Curl",     0,   180, 255, "#00b4ff" }, // 0: Neon Cyan / Blue
-  { 1, "ACT-PRESS", "Shoulder Press", 180, 0,   255, "#b400ff" }, // 1: Vibrant Purple
+  { 1, "ACT-RAISE", "Lateral Raise",  180, 0,   255, "#b400ff" }, // 1: Vibrant Purple
   { 2, "ACT-SQUAT", "Squat",          0,   255, 80,  "#00ff50" }, // 2: Emerald Green (extensible)
 };
 constexpr size_t NUM_BEACONS = sizeof(BEACON_PROFILES) / sizeof(BEACON_PROFILES[0]);
 
 // Default beacon profile if not specified:
 // 0 = Bicep Curl (Neon Cyan / Blue)
-// 1 = Shoulder Press (Vibrant Amber / Orange)
+// 1 = Lateral Raise (Vibrant Purple)
 // 2 = Squat (Emerald Green)
 #if !defined(DEFAULT_BEACON_INDEX) && !defined(FORCE_BEACON_INDEX)
 #define DEFAULT_BEACON_INDEX 0
@@ -88,7 +88,7 @@ void configureAndStartAdvertising() {
   Serial.printf("  NeoPixel Pin:   GPIO %d\r\n", PIN_NEOPIXEL);
   Serial.printf("  MAC Address:    %s\r\n", BLEDevice::getAddress().toString().c_str());
   Serial.println("==================================================");
-  Serial.println("Type '0' for Curl, '1' for Press, '2' for Squat");
+  Serial.println("Type '0' for Curl, '1' for Lateral Raise, '2' for Squat");
   Serial.println("==================================================");
 }
 
@@ -130,14 +130,14 @@ void loop() {
     if (c == '0' || c == 'c' || c == 'C') {
       Serial.println("\r\n[CMD] Switching beacon to 0: Bicep Curl");
       setBeaconProfile(0);
-    } else if (c == '1' || c == 'p' || c == 'P') {
-      Serial.println("\r\n[CMD] Switching beacon to 1: Shoulder Press");
+    } else if (c == '1' || c == 'r' || c == 'R') {
+      Serial.println("\r\n[CMD] Switching beacon to 1: Lateral Raise");
       setBeaconProfile(1);
     } else if (c == '2' || c == 's' || c == 'S') {
       Serial.println("\r\n[CMD] Switching beacon to 2: Squat");
       setBeaconProfile(2);
     } else if (c == 'h' || c == '?') {
-      Serial.println("\r\nCommands: '0'=Bicep Curl (Cyan), '1'=Shoulder Press (Purple), '2'=Squat (Green)");
+      Serial.println("\r\nCommands: '0'=Bicep Curl (Cyan), '1'=Lateral Raise (Purple), '2'=Squat (Green)");
     }
   }
 
